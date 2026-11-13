@@ -97,7 +97,10 @@ async def test_annotations_with_and_without_output_type(settings):
 
     # Con output_type: las anotaciones deben seguir extrayéndose del mensaje.
     agent = build_research_agent(
-        settings, role="sector_mapper", instructions="Investiga brevemente."
+        "sector_mapper",
+        model=settings.bore_model_research,
+        instructions="Investiga brevemente.",
+        country="ES",
     )
     from agents import Runner
 

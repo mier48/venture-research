@@ -18,10 +18,12 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bore.agents.prompt_registry import render_prompt
 from bore.agents.schemas import (
+    ROLE_OUTPUT_TYPES,
     CriterionAssessmentOutput,
     ExtractedClaim,
     MarketValidationOutput,
@@ -79,6 +81,18 @@ def clean_json(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(clean_json(v) for v in value)
     return value
+
+
+def _output_type_for(role: str) -> type[BaseModel]:
+    """Esquema de salida estructurada del rol; un rol sin entrada es un error
+    de programación y falla antes de llamar al proveedor."""
+    try:
+        return ROLE_OUTPUT_TYPES[role]
+    except KeyError:
+        raise ValueError(
+            f"Papel de análisis sin output_type registrado: {role!r} "
+            "(añádelo a ROLE_OUTPUT_TYPES en bore.agents.schemas)"
+        ) from None
 
 
 def input_hash(payload: Any) -> str:
@@ -234,6 +248,7 @@ class PipelineContext:
                 },
             ),
             input_text=input_text,
+            output_type=_output_type_for(role),
             opportunity_id=str(opp) if opp else None,
         )
         started = time.monotonic()

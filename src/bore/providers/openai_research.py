@@ -40,14 +40,10 @@ class OpenAIResearchProvider:
         agent = factory.build_research_agent(
             task.role,
             model=factory.model_for_role(task.role, self._models),
+            instructions=task.instructions,
             country=task.country,
             search_context_size=self._settings.bore_search_context_size,
             max_web_search_calls=task.max_web_search_calls,
-            context={
-                "sector": task.input_text[:200],
-                "country": task.country,
-                "language": task.language,
-            },
         )
         started = time.monotonic()
         try:

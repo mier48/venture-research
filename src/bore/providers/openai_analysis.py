@@ -39,16 +39,18 @@ class OpenAIAnalysisProvider:
     async def analyze(self, task: AnalysisTask[T]) -> AnalysisResult[T]:
         from agents import Runner
 
+        if task.output_type is None:
+            # Sin esquema de salida no hay contrato: error de programación,
+            # nunca recurrir a un BaseModel genérico.
+            raise ContractViolationError(
+                f"El rol '{task.role}' no define output_type de salida estructurada"
+            )
         model = factory.model_for_role(task.role, self._models)
         agent = factory.build_analysis_agent(
             task.role,
             model=model,
-            output_type=task.output_type or BaseModel,
-            context={
-                "sector": task.input_text[:200],
-                "country": "ES",
-                "language": "es-ES",
-            },
+            instructions=task.instructions,
+            output_type=task.output_type,
         )
         input_text = task.input_text
         last_error: str | None = None

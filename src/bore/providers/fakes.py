@@ -704,7 +704,16 @@ class FakeAnalysisProvider:
             output = _review(opp)
         else:  # pragma: no cover
             raise ValueError(f"Papel desconocido: {role}")
-        return AnalysisResult(output=output, usage=_usage())  # type: ignore[arg-type]
+        # El proveedor real exige output_type y valida la salida contra él;
+        # el fake hace lo mismo para que la suite offline detecte este bug.
+        if task.output_type is None:
+            raise TypeError(f"El rol '{role}' recibió una tarea sin output_type")
+        if not isinstance(output, task.output_type):
+            raise TypeError(
+                f"La salida del rol '{role}' ({type(output).__name__}) no es una "
+                f"instancia de {task.output_type.__name__}"
+            )
+        return AnalysisResult(output=output, usage=_usage())
 
 
 class FakeSourceVerifier:

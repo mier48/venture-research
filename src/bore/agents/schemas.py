@@ -156,3 +156,20 @@ class CriticalReviewOutput(BaseModel):
     recommended_changes: list[str]
     final_verdict: Literal["keep_researching", "commercial_validation", "discard"]
     counter_claims: list[ExtractedClaim] = Field(default_factory=list)
+
+
+# Papel -> esquema de salida estructurada que consume el pipeline (4.1).
+# Obligatorio: un rol sin entrada aquí es un error de programación y debe
+# fallar antes de llamar al proveedor.
+ROLE_OUTPUT_TYPES: dict[str, type[BaseModel]] = {
+    "sector_mapper": SectorMapOutput,
+    "demand_researcher": DemandResearchOutput,
+    "idea_generator": IdeaGenerationOutput,
+    "dedup_screener": SemanticDedupOutput,
+    "eligibility_assessor": EligibilityOutput,
+    "screener": ScreeningOutput,
+    "market_validation": MarketValidationOutput,
+    "evidence_judge": EvidenceJudgeOutput,
+    "criterion_assessor": CriterionAssessmentOutput,
+    "critical_reviewer": CriticalReviewOutput,
+}

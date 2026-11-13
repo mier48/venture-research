@@ -229,3 +229,173 @@ def test_extract_counts_web_calls_only_from_items():
     )
     _, _, web_calls = _extract_sources_and_queries(result)
     assert web_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Contrato de salidas estructuradas (D42)
+# ---------------------------------------------------------------------------
+
+from agents import AgentOutputSchema  # noqa: E402
+
+from bore.agents.schemas import ROLE_OUTPUT_TYPES  # noqa: E402
+
+_EXAMPLE_JSON: dict[str, str] = {
+    "sector_mapper": json.dumps(
+        {
+            "subsectors": ["gestión de alquileres"],
+            "actors": ["propietarios"],
+            "processes": ["contratación"],
+            "problems": ["fricción documental"],
+            "search_terms": ["alquiler software"],
+            "claims": [
+                {
+                    "text": "La gestión manual genera fricción.",
+                    "kind": "fact",
+                    "criterion": "demand",
+                }
+            ],
+        }
+    ),
+    "demand_researcher": json.dumps(
+        {
+            "demand_signals": ["búsquedas crecientes"],
+            "information_gaps": ["precios opacos"],
+            "claims": [{"text": "Hay quejas recurrentes.", "kind": "fact", "criterion": None}],
+        }
+    ),
+    "idea_generator": json.dumps(
+        {
+            "ideas": [
+                {
+                    "name": "Idea ejemplo",
+                    "sector_subcategory": "alquileres",
+                    "customer_segment": "propietarios",
+                    "buyer": "administrador",
+                    "problem": "problema",
+                    "solution": "solución",
+                    "value_proposition": "propuesta",
+                    "business_model": "suscripción",
+                }
+            ]
+        }
+    ),
+    "dedup_screener": json.dumps({"groups": [[0, 1]]}),
+    "eligibility_assessor": json.dumps(
+        {
+            "candidate_index": 0,
+            "assessments": [{"rule": "Es software B2B", "answer": "yes", "reason": "SaaS"}],
+        }
+    ),
+    "screener": json.dumps(
+        {"candidate_index": 0, "demand": 6, "distribution": 7, "competition": 5}
+    ),
+    "market_validation": json.dumps(
+        {
+            "competitors": [
+                {
+                    "name": "Competidor",
+                    "category": "direct",
+                    "price_value": 49.0,
+                    "price_currency": "EUR",
+                    "price_unit": "mes",
+                    "price_country": "ES",
+                }
+            ],
+            "claims": [
+                {
+                    "text": "Cobra 49 EUR/mes.",
+                    "kind": "fact",
+                    "criterion": "monetization",
+                }
+            ],
+        }
+    ),
+    "evidence_judge": json.dumps({"verdict": "supports", "rationale": "encaja"}),
+    "criterion_assessor": json.dumps(
+        {
+            "scores": [
+                {
+                    "criterion": "demand",
+                    "score": 7,
+                    "claims": [{"ref": "C1", "role": "evidence"}],
+                }
+            ]
+        }
+    ),
+    "critical_reviewer": json.dumps(
+        {
+            "objections": ["mercado pequeño"],
+            "recommended_changes": ["concretar comprador"],
+            "final_verdict": "keep_researching",
+        }
+    ),
+}
+
+
+def test_role_output_types_cover_all_stage_roles():
+    """Todo rol usado en una llamada do_analysis de stages.py tiene esquema."""
+    import re
+    from pathlib import Path
+
+    from bore.orchestration import stages
+
+    source = Path(stages.__file__).read_text(encoding="utf-8")
+    roles = set(re.findall(r'do_analysis\(\s*"(\w+)"', source))
+    assert roles
+    assert roles <= set(ROLE_OUTPUT_TYPES), roles - set(ROLE_OUTPUT_TYPES)
+
+
+@pytest.mark.parametrize("role", sorted(ROLE_OUTPUT_TYPES))
+def test_output_schema_is_strict_compatible(role):
+    """Cada esquema genera JSON schema estricto válido y valida un ejemplo."""
+    schema = AgentOutputSchema(ROLE_OUTPUT_TYPES[role])
+    js = schema.json_schema()
+    assert isinstance(js, dict)
+    assert schema.is_strict_json_schema
+    schema.validate_json(_EXAMPLE_JSON[role])
+
+
+async def test_analysis_uses_task_instructions_and_returns_typed_output():
+    valid = SectorMapOutput(
+        subsectors=["s"],
+        actors=[],
+        processes=[],
+        problems=[],
+        search_terms=[],
+        claims=[],
+    )
+    model = ScriptedModel(
+        steps=[
+            ModelStep(
+                output=[
+                    message_with_citation(text=json.dumps(valid.model_dump()), url="https://x.es/b")
+                ]
+            )
+        ]
+    )
+    provider = OpenAIAnalysisProvider(settings_with(model))
+    task = AnalysisTask(
+        role="sector_mapper",
+        stage="sector_mapping",
+        instructions="INSTRUCCIONES_UNICAS_XYZ",
+        input_text="datos",
+        output_type=SectorMapOutput,
+    )
+    result = await provider.analyze(task)
+    assert isinstance(result.output, SectorMapOutput)
+    assert result.output.subsectors == ["s"]
+    assert model.first_call is not None
+    assert model.first_call.system_instructions == "INSTRUCCIONES_UNICAS_XYZ"
+
+
+async def test_analysis_requires_output_type():
+    provider = OpenAIAnalysisProvider(settings_with(ScriptedModel()))
+    task = AnalysisTask(
+        role="sector_mapper",
+        stage="sector_mapping",
+        instructions="i",
+        input_text="datos",
+        output_type=None,
+    )
+    with pytest.raises(ContractViolationError):
+        await provider.analyze(task)

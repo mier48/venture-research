@@ -17,8 +17,6 @@ from agents import Agent, ModelSettings, WebSearchTool
 from openai.types.responses.web_search_tool_param import UserLocation
 from pydantic import BaseModel
 
-from bore.agents.prompt_registry import render_prompt
-
 # Papel -> variable de modelo. CriticalReviewer usa REVIEW (investigación y
 # estructuración); EvidenceJudge y CriterionAssessor usan ANALYSIS (3.4).
 ROLE_MODEL_ENV: dict[str, str] = {
@@ -62,10 +60,10 @@ def build_research_agent(
     role: str,
     *,
     model: str,
+    instructions: str,
     country: str,
     search_context_size: str = "medium",
     max_web_search_calls: int | None = None,
-    context: dict[str, str] | None = None,
 ) -> Agent[Any]:
     """Agente de investigación con única herramienta WebSearchTool."""
     extra_args: dict[str, Any] = {}
@@ -74,7 +72,7 @@ def build_research_agent(
         extra_args["max_tool_calls"] = max_web_search_calls
     return Agent(
         name=f"bore_{role}",
-        instructions=render_prompt(role, context or {}),
+        instructions=instructions,
         model=model,
         tools=[
             WebSearchTool(
@@ -93,13 +91,13 @@ def build_analysis_agent(
     role: str,
     *,
     model: str,
+    instructions: str,
     output_type: type[BaseModel],
-    context: dict[str, str] | None = None,
 ) -> Agent[Any]:
     """Agente de estructuración: sin herramientas, salida tipada."""
     return Agent(
         name=f"bore_{role}",
-        instructions=render_prompt(role, context or {}),
+        instructions=instructions,
         model=model,
         tools=[],
         output_type=output_type,

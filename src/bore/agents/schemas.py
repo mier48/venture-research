@@ -109,10 +109,20 @@ class MarketValidationOutput(BaseModel):
     competitors: list[CompetitorInfo] = Field(default_factory=list)
     acquisition: list[str] = Field(default_factory=list)
     technical_notes: list[str] = Field(default_factory=list)
+    data_barriers: list[str] = Field(default_factory=list)
+    legal_operational_risks: list[str] = Field(default_factory=list)
+    llm_substitution_risk: str | None = None
+    technical_scope_estimate: str | None = None
+    maintenance_cost_estimate: str | None = None
     mvp_weeks_estimate: int | None = None
     price_hypothesis_eur_month: float | None = None
     variable_cost_eur_month: float | None = None
     fixed_cost_eur_month: float | None = None
+    # Universo de compradores (nº estimado de clientes potenciales) e índice de
+    # la afirmación en `claims` que lo documenta; la penetración solo se calcula
+    # si esa afirmación queda `verified` (5.3).
+    buyer_universe_customers: int | None = None
+    buyer_universe_claim_index: int | None = None
     claims: list[ExtractedClaim] = Field(default_factory=list)
 
 

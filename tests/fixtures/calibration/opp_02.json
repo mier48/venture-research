@@ -1,0 +1,16 @@
+{
+  "id": "opp-02",
+  "name": "idea-debil-2",
+  "label": "weak",
+  "audited_claims_note": "Afirmaciones ficticias ya auditadas (dominios example.*); solo se calibran notas.",
+  "criterion_scores": {
+    "demand": 4,
+    "distribution": 3,
+    "competition": 4,
+    "technical": 5,
+    "operational_legal": 6,
+    "monetization": 4,
+    "ai_defensibility": 4
+  },
+  "confidence": "low"
+}

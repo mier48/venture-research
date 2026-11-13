@@ -1,0 +1,16 @@
+{
+  "id": "opp-05",
+  "name": "idea-buena-1",
+  "label": "good",
+  "audited_claims_note": "Afirmaciones ficticias ya auditadas (dominios example.*); solo se calibran notas.",
+  "criterion_scores": {
+    "demand": 9,
+    "distribution": 8,
+    "competition": 7,
+    "technical": 8,
+    "operational_legal": 8,
+    "monetization": 8,
+    "ai_defensibility": 8
+  },
+  "confidence": "high"
+}

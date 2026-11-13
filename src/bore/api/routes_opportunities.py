@@ -40,6 +40,23 @@ async def opportunity_detail(
     scores_initial = await repo.list_criterion_scores(session, opp_id, revision="initial")
     scores_final = await repo.list_criterion_scores(session, opp_id, revision="final")
     reviews = await repo.list_reviews(session, opp_id)
+    initial_by_crit = {s["criterion_code"]: s["score"] for s in scores_initial}
+    score_diff = {
+        s["criterion_code"]: s["score"] - initial_by_crit.get(s["criterion_code"], 0)
+        for s in scores_final
+        if s["score"] is not None and s["score"] != initial_by_crit.get(s["criterion_code"])
+    }
+    links_by_claim: dict[str, list[dict[str, Any]]] = {}
+    for x in links:
+        src = sources.get(str(x["source_id"]))
+        links_by_claim.setdefault(str(x["claim_id"]), []).append(
+            {
+                "url": src["url"] if src else None,
+                "access_status": src["access_status"] if src else None,
+                "support_type": x["support_type"],
+                "quote_match": x["quote_match"],
+            }
+        )
     return {
         "id": str(opp["id"]),
         "research_run_id": str(opp["research_run_id"]),
@@ -57,6 +74,8 @@ async def opportunity_detail(
         "business_model": opp["business_model"],
         "mvp_scope": opp["mvp_scope"],
         "excluded_features": opp["excluded_features"],
+        "acquisition": opp["acquisition"],
+        "assumptions": opp["assumptions"],
         "unit_economics": opp["unit_economics"],
         "risks": opp["risks"],
         "competitors": [
@@ -68,7 +87,10 @@ async def opportunity_detail(
                 "price_value": float(c["price_value"]) if c["price_value"] is not None else None,
                 "price_currency": c["price_currency"],
                 "price_unit": c["price_unit"],
+                "price_country": c["price_country"],
                 "price_status": c["price_status"],
+                "strengths": c["strengths"],
+                "weaknesses": c["weaknesses"],
             }
             for c in competitors
         ],
@@ -86,9 +108,11 @@ async def opportunity_detail(
                     "criterion": s["criterion_code"],
                     "score": s["score"],
                     "confidence": s["confidence"],
+                    "rationale": s["rationale"],
                 }
                 for s in scores_final
             ],
+            "diff": score_diff,
         },
         "claims": [
             {
@@ -97,6 +121,7 @@ async def opportunity_detail(
                 "criterion": c["criterion_code"],
                 "verification_status": c["verification_status"],
                 "disputed": c["disputed"],
+                "evidence": links_by_claim.get(str(c["id"]), []),
             }
             for c in claims
         ],
@@ -111,6 +136,11 @@ async def opportunity_detail(
             for s in sources.values()
         ],
         "reviews": [
-            {"objections": r["objections"], "final_verdict": r["final_verdict"]} for r in reviews
+            {
+                "objections": r["objections"],
+                "recommended_changes": r["recommended_changes"],
+                "final_verdict": r["final_verdict"],
+            }
+            for r in reviews
         ],
     }

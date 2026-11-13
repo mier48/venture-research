@@ -112,7 +112,9 @@ async def test_no_url_from_prose_and_idempotent_stages(db, run_id):
         # Todas las fuentes persistidas son del proveedor (synthetic) y con
         # access_status calculado; ninguna procede de la prosa.
         assert all(x.provenance == "synthetic" for x in srcs)
-        assert all(x.access_status in ("ok", "blocked") for x in srcs)
+        # El sondeo persiste fuentes por candidata; las páginas no registradas
+        # en el fake devuelven not_found (estado calculado igualmente).
+        assert all(x.access_status in ("ok", "blocked", "not_found") for x in srcs)
         n_opps = (
             await s.execute(
                 sa.select(sa.func.count())

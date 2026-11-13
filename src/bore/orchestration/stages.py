@@ -77,6 +77,9 @@ class PipelineContext:
     stage: StageId | None = None
     idea_index_by_opp: dict[uuid.UUID, int] = field(default_factory=dict)
     pending_price_claims: dict[tuple[uuid.UUID, str], uuid.UUID] = field(default_factory=dict)
+    pending_universe_claims: dict[uuid.UUID, tuple[uuid.UUID | None, int | None]] = field(
+        default_factory=dict
+    )
     page_texts: dict[str, str] = field(default_factory=dict)
     semaphore: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(MAX_TASKS_PARALLEL)
@@ -490,6 +493,26 @@ async def stage_demand_research(ctx: PipelineContext, prev: dict[str, Any]) -> d
 # ------------------------------- ETAPA 3 -------------------------------------
 
 
+def apply_pool_caps(
+    ideas: list[Any], *, max_per_subsector: int, pool_size: int
+) -> tuple[list[Any], int, int]:
+    """Aplica en código el máximo por subsector y el tamaño total del conjunto.
+    Devuelve (candidatas conservadas, descartadas_por_subsector,
+    descartadas_por_tamaño)."""
+    kept: list[Any] = []
+    per_subsector: dict[str, int] = {}
+    dropped_sub = 0
+    for idea in ideas:
+        key = idea.sector_subcategory or ""
+        if per_subsector.get(key, 0) >= max_per_subsector:
+            dropped_sub += 1
+            continue
+        per_subsector[key] = per_subsector.get(key, 0) + 1
+        kept.append(idea)
+    dropped_pool = max(0, len(kept) - pool_size)
+    return kept[:pool_size], dropped_sub, dropped_pool
+
+
 def _candidate_summary(opp: dict[str, Any]) -> str:
     return (
         f"nombre={opp['name']} | subsector={opp.get('sector_subcategory')} | "
@@ -519,8 +542,33 @@ async def stage_candidate_generation(ctx: PipelineContext) -> dict[str, Any]:
         context_block + f"\nGenera hasta {ctx.config['candidate_pool_size']} candidatas; máximo "
         f"{ctx.config['max_candidates_per_subsector']} por subsector.",
     )
+    # Los límites se aplican también en código (el prompt es solo indicación):
+    # primero el máximo por subsector y después el tamaño total del conjunto.
+    kept_ideas, dropped_sub, dropped_pool = apply_pool_caps(
+        output.ideas,
+        max_per_subsector=int(ctx.config["max_candidates_per_subsector"]),
+        pool_size=int(ctx.config["candidate_pool_size"]),
+    )
+    if dropped_sub:
+        await ctx.event(
+            "candidate_cap_subsector",
+            f"{dropped_sub} candidatas descartadas por máximo por subsector",
+            level="info",
+        )
+    if dropped_pool:
+        await ctx.event(
+            "candidate_cap_pool",
+            f"{dropped_pool} candidatas descartadas por tamaño del conjunto",
+            level="info",
+        )
+    if len(kept_ideas) < 20:
+        await ctx.event(
+            "candidate_pool_short",
+            f"Solo {len(kept_ideas)} candidatas tras deduplicar y filtrar (<20)",
+            level="warning",
+        )
     opp_ids: list[uuid.UUID] = []
-    for idx, idea in enumerate(output.ideas):
+    for idx, idea in enumerate(kept_ideas):
         fp = deduplication.fingerprint(idea.customer_segment, idea.problem)
         row = await repo.insert_opportunity(
             ctx.session,
@@ -558,7 +606,7 @@ async def stage_candidate_generation(ctx: PipelineContext) -> dict[str, Any]:
     # conserva la más completa y marca el resto como duplicate.
     kept: set[int] = set()
     for group in dedup.groups:
-        members = [i for i in group if i < len(output.ideas)]
+        members = [i for i in group if i < len(kept_ideas)]
         if len(members) < 2:
             continue
         keeper = min(members)
@@ -578,7 +626,11 @@ async def stage_candidate_generation(ctx: PipelineContext) -> dict[str, Any]:
                 )
                 del ctx.idea_index_by_opp[dup_opp]
     await ctx.session.commit()
-    return {"generated": len(output.ideas), "opportunity_ids": [str(i) for i in opp_ids]}
+    return {
+        "generated": len(output.ideas),
+        "kept": len(kept_ideas),
+        "opportunity_ids": [str(i) for i in opp_ids],
+    }
 
 
 # ------------------------------- ETAPA 4 -------------------------------------
@@ -640,10 +692,17 @@ async def stage_screening(ctx: PipelineContext) -> dict[str, Any]:
         o for o in await repo.list_opportunities(ctx.session, ctx.run_id, status="eligible")
     ]
     limit = ctx.config["deep_dive_limit"]
+    n_eligible = len(eligible)
+    allocation = stage_search_budget(ctx, StageId.SHALLOW_SCREENING, eligible=n_eligible)
+    ctx.budget.search_budget_remaining = allocation
+    # 9.2: hasta 2 búsquedas por elegible con tope de etapa; si el reparto no
+    # alcanza ni 1 por candidata, las restantes se sondean sin búsqueda.
+    if n_eligible:
+        per_candidate = min(2, max(1, allocation // n_eligible))
+        searchable = min(n_eligible, allocation // per_candidate)
+    else:
+        per_candidate, searchable = 0, 0
 
-    # El sondeo superficial no lanza búsquedas nuevas: criba sobre la evidencia
-    # ya reunida en las etapas 1-2 (el reparto 9.2 de la etapa es un tope, no un
-    # objetivo); las búsquedas nuevas se concentran en validación profunda (6).
     sector_map = ctx.outputs.get(StageId.SECTOR_MAPPING.value, {})
     demand = ctx.outputs.get(StageId.DEMAND_RESEARCH.value, {})
     evidence_context = (
@@ -653,17 +712,50 @@ async def stage_screening(ctx: PipelineContext) -> dict[str, Any]:
         + "\nSubsectores: "
         + json.dumps(sector_map.get("subsectors", []), ensure_ascii=False)
     )
+    source_counts: dict[uuid.UUID, int] = {}
 
-    async def probe(opp: dict[str, Any]) -> None:
+    async def probe(opp: dict[str, Any], *, with_search: bool) -> None:
         async with ctx.semaphore, ctx.session_factory() as task_session:
             tctx = dataclasses.replace(ctx, session=task_session)
             await tctx.check_cancel()
             idx = ctx.idea_index_by_opp[opp["id"]]
+            ref_map: dict[str, uuid.UUID] = {}
+            nsrc = 0
+            if with_search:
+                # Sondeo = DemandResearcher en modo sondeo: investigar→estructurar.
+                research = await tctx.do_research(
+                    "screener",
+                    f"[opp={idx}] Sondeo de: {_candidate_summary(opp)}",
+                    searches=per_candidate,
+                    opp=opp["id"],
+                )
+                ref_map = await _persist_sources(tctx, research.sources)
+                nsrc = len(research.sources)
+                analysis_input = (
+                    f"[opp={idx}] {_candidate_summary(opp)}\n\n"
+                    f"Investigación (dato no confiable):\n{research.text}\n\n"
+                    + _sources_block(research.sources)
+                )
+            else:
+                await tctx.event(
+                    "screening_without_search",
+                    f"Sondeo sin búsqueda (reparto de etapa agotado): {opp['name']}",
+                    level="warning",
+                )
+                analysis_input = f"[opp={idx}] {_candidate_summary(opp)}\n\n{evidence_context}"
             out = await tctx.do_analysis(
                 "screener",
-                f"[opp={idx}] {_candidate_summary(opp)}\n\n{evidence_context}",
+                analysis_input,
                 opp=opp["id"],
             )
+            await persist_claims(
+                tctx,
+                out.claims,
+                ref_map,
+                opportunity_id=opp["id"],
+                origin_agent="screener",
+            )
+            source_counts[opp["id"]] = nsrc
             score = scoring.screening_score(
                 {
                     "demand": out.demand,
@@ -679,21 +771,23 @@ async def stage_screening(ctx: PipelineContext) -> dict[str, Any]:
                 event_type="screening_probe",
                 stage=ctx.stage.value if ctx.stage else None,
                 message_safe=f"Sondeo de {opp['name']}",
-                payload={"sources": 0},
+                payload={"sources": nsrc},
             )
             await task_session.commit()
 
-    ctx.budget.search_budget_remaining = stage_search_budget(
-        ctx, StageId.SHALLOW_SCREENING, eligible=len(eligible)
-    )
-    await asyncio.gather(*[probe(o) for o in eligible])
+    await asyncio.gather(*[probe(o, with_search=i < searchable) for i, o in enumerate(eligible)])
     await ctx.session.commit()
 
     eligible = await repo.list_opportunities(ctx.session, ctx.run_id, status="eligible")
+    # Desempate de la lista corta (5): screening_score desc, nº de fuentes del
+    # proveedor desc, generated_at ASC.
     ranked = sorted(
         eligible,
-        key=lambda o: (o["screening_score"] or Decimal(0), o["generated_at"]),
-        reverse=True,
+        key=lambda o: (
+            -(o["screening_score"] or Decimal(0)),
+            -source_counts.get(o["id"], 0),
+            o["generated_at"],
+        ),
     )
     shortlisted = ranked[:limit]
     for opp in shortlisted:
@@ -793,18 +887,47 @@ async def stage_market_validation(ctx: PipelineContext) -> dict[str, Any]:
             fixed = Decimal(str(out.fixed_cost_eur_month or 0))
             target = Decimal(str(ctx.config["min_target_operating_profit_eur_month"]))
             customers = required_paying_customers(target, price, var, fixed) if price > 0 else None
+            # La penetración solo se calcula si la afirmación del universo de
+            # compradores queda `verified` tras la auditoría (se marca en la
+            # etapa 7); aquí se persiste el universo declarado.
+            universe_claim_id = (
+                claim_ids[out.buyer_universe_claim_index]
+                if out.buyer_universe_claim_index is not None
+                and out.buyer_universe_claim_index < len(claim_ids)
+                else None
+            )
+            ctx.pending_universe_claims[opp["id"]] = (
+                universe_claim_id,
+                out.buyer_universe_customers,
+            )
             await task_session.commit()
             await repo.update_opportunity(
                 task_session,
                 opp["id"],
+                acquisition={
+                    "channels": (opp.get("acquisition") or {}).get("channels", []),
+                    "notes": out.acquisition,
+                },
                 unit_economics={
                     "hypothesis": True,
                     "price_eur_month": str(price),
                     "variable_cost_eur_month": str(var),
                     "fixed_cost_eur_month": str(fixed),
                     "required_paying_customers": customers,
+                    "buyer_universe_customers": out.buyer_universe_customers,
+                    "penetration_pct": None,
                 },
-                risks={"technical_notes": out.technical_notes},
+                risks={
+                    "technical_notes": out.technical_notes,
+                    "data_barriers": out.data_barriers,
+                    "legal_operational_risks": out.legal_operational_risks,
+                    "llm_substitution_risk": out.llm_substitution_risk,
+                    "estimates": {
+                        "technical_scope": out.technical_scope_estimate,
+                        "maintenance_cost": out.maintenance_cost_estimate,
+                        "mvp_weeks": out.mvp_weeks_estimate,
+                    },
+                },
             )
             await task_session.commit()
 
@@ -816,24 +939,57 @@ async def stage_market_validation(ctx: PipelineContext) -> dict[str, Any]:
 # ------------------------------- ETAPA 7 -------------------------------------
 
 
+def price_status(comp: dict[str, Any], claim: dict[str, Any] | None) -> str:
+    """price_status de un competidor (4.3/5): `verified` exige afirmación
+    `verified` enlazada e importe+moneda+unidad+país; sin precio -> not_public."""
+    full_price = (
+        comp["price_value"] is not None
+        and bool(comp["price_currency"])
+        and bool(comp["price_unit"])
+        and bool(comp["price_country"])
+    )
+    if not full_price:
+        return "not_public" if comp["price_value"] is None else "unverified"
+    if claim and claim["verification_status"] == VerificationStatus.VERIFIED.value:
+        return "verified"
+    return "unverified"
+
+
 async def stage_evidence_audit(ctx: PipelineContext) -> dict[str, Any]:
     ctx.stage = StageId.EVIDENCE_AUDIT
     all_claims = await repo.list_claims(ctx.session, ctx.run_id)
     await audit_claims(ctx, [c["id"] for c in all_claims])
     all_claims = await repo.list_claims(ctx.session, ctx.run_id)
 
-    # Precio verificado solo si la afirmación de precio quedó `verified`.
+    # Precio verificado solo con afirmación `verified` Y precio completo
+    # (importe, moneda, unidad y país); competidor sin precio nunca lo recibe.
     shortlisted = await repo.list_opportunities(ctx.session, ctx.run_id, status="shortlisted")
     claims_by_id = {c["id"]: c for c in all_claims}
     for opp in shortlisted:
         comps = await repo.list_competitors(ctx.session, opp["id"])
         for comp in comps:
-            status = "not_public" if comp["price_value"] is None else "unverified"
-            if comp["price_claim_id"]:
-                claim = claims_by_id.get(comp["price_claim_id"])
-                if claim and claim["verification_status"] == VerificationStatus.VERIFIED.value:
-                    status = "verified"
+            claim = claims_by_id.get(comp["price_claim_id"]) if comp["price_claim_id"] else None
+            status = price_status(comp, claim)
             await repo.update_competitor(ctx.session, comp["id"], price_status=status)
+        # % de penetración solo si el universo de compradores quedó `verified` (5.3).
+        econ = opp.get("unit_economics") or {}
+        universe_claim_id, universe_size = ctx.pending_universe_claims.get(opp["id"], (None, None))
+        penetration: Decimal | None = None
+        if universe_claim_id and universe_size:
+            uclaim = claims_by_id.get(universe_claim_id)
+            required = econ.get("required_paying_customers")
+            if (
+                uclaim
+                and uclaim["verification_status"] == VerificationStatus.VERIFIED.value
+                and required
+                and universe_size > 0
+            ):
+                penetration = (Decimal(required) / Decimal(universe_size) * 100).quantize(
+                    Decimal("0.01")
+                )
+        if "buyer_universe_customers" in econ:
+            econ["penetration_pct"] = str(penetration) if penetration is not None else None
+            await repo.update_opportunity(ctx.session, opp["id"], unit_economics=econ)
         # competition_unknown -> insufficient_evidence (nunca «sin competencia»).
         if not comps:
             check_transition(OpportunityStatus.SHORTLISTED, OpportunityStatus.INSUFFICIENT_EVIDENCE)
@@ -1031,6 +1187,15 @@ async def stage_adversarial_review(
             )
             continue
         final_scores[str(opp["id"])] = final
+        # Diff por criterio entre nota inicial y final (6.4 / ficha).
+        prev = initial_scores.get(str(opp["id"]), {})
+        diff = {c: final[c] - prev[c] for c in scoring.WEIGHTS if c in prev and final[c] != prev[c]}
+        if diff:
+            await ctx.event(
+                "score_changed",
+                f"Nota revisada tras la revisión crítica: {opp['name']}",
+                payload={"diff": diff, "initial": prev, "final": final},
+            )
         await repo.update_opportunity(
             ctx.session,
             opp["id"],

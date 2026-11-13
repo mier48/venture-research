@@ -71,6 +71,7 @@ _SHORTLISTED = list(range(8))
 _COMPETITION_UNKNOWN = 4
 _CONTRADICTED_OPP = 3
 _FEW_SOURCES_OPP = 2
+_UNIVERSE_SIZE = 10_000
 _BELOW_THRESHOLD_OPP = 5
 _NOT_REVIEWED_OPP = 7
 
@@ -571,7 +572,7 @@ class FakeResearchProvider:
             text=f"Texto de investigación de ejemplo para {task.role} ({task.stage}).",
             sources=tuple(sources),
             queries=(f"consulta de ejemplo {task.role}",),
-            usage=_usage(searches=min(len(sources), 3)),
+            usage=_usage(searches=min(task.max_web_search_calls or len(sources), len(sources))),
         )
 
 
@@ -640,19 +641,46 @@ class FakeAnalysisProvider:
                 distribution=dist,
                 competition=comp,
                 notes="Notas de sondeo de ejemplo",
+                claims=[
+                    _extracted(
+                        _quote(idx, 0),
+                        criterion="demand",
+                        refs=["S1"],
+                        quote=_quote(idx, 0),
+                    )
+                ],
             )
         elif role == "market_validation":
             opp = _marker(task.input_text, "opp")
             assert opp is not None
+            claims = _opp_claims(opp)
+            # Universo de compradores con afirmación citada: si queda
+            # `verified`, el código calcula el % de penetración (5.3).
+            claims.append(
+                _extracted(
+                    f"Universo de compradores de ejemplo: {_UNIVERSE_SIZE} clientes "
+                    f"potenciales para la idea {opp}.",
+                    criterion="demand",
+                    refs=["S1"],
+                    quote=_quote(opp, 0),
+                )
+            )
             output = MarketValidationOutput(
                 competitors=_opp_competitors(opp),
                 acquisition=["Canal de ejemplo"],
                 technical_notes=["Nota técnica de ejemplo"],
+                data_barriers=["Barrera de datos de ejemplo"],
+                legal_operational_risks=["Riesgo legal-operativo de ejemplo"],
+                llm_substitution_risk="Riesgo de sustitución por LLM de ejemplo",
+                technical_scope_estimate="Alcance técnico estimado de ejemplo",
+                maintenance_cost_estimate="Coste de mantenimiento estimado de ejemplo",
                 mvp_weeks_estimate=4,
                 price_hypothesis_eur_month=29.0,
                 variable_cost_eur_month=4.0,
                 fixed_cost_eur_month=300.0,
-                claims=_opp_claims(opp),
+                buyer_universe_customers=_UNIVERSE_SIZE,
+                buyer_universe_claim_index=len(claims) - 1,
+                claims=claims,
             )
         elif role == "evidence_judge":
             if "[judge:contradicts]" in task.input_text:

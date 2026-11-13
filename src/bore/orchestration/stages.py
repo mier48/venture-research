@@ -17,6 +17,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bore.agents.prompt_registry import render_prompt
 from bore.agents.schemas import (
     CriterionAssessmentOutput,
     ExtractedClaim,
@@ -39,7 +40,7 @@ from bore.domain.enums import (
 )
 from bore.domain.models import check_transition
 from bore.domain.unit_economics import required_paying_customers
-from bore.orchestration.budgets import BudgetManager, Pricing
+from bore.orchestration.budgets import BudgetManager, Pricing, stage_search_budget
 from bore.providers.contracts import (
     AnalysisProvider,
     AnalysisTask,
@@ -47,8 +48,10 @@ from bore.providers.contracts import (
     ResearchTask,
     SourceVerifier,
 )
+from bore.providers.errors import ProviderError
 
 MAX_TASKS_PARALLEL = 3
+_RESERVE_SEARCHES_PER_OPP = 4
 
 
 def input_hash(payload: Any) -> str:
@@ -69,6 +72,8 @@ class PipelineContext:
     pricing: Pricing
     provider_name: str = "fake"
     model: str | None = "fake-model"
+    outputs: dict[str, Any] = field(default_factory=dict)
+    model_by_role: dict[str, str | None] = field(default_factory=dict)
     stage: StageId | None = None
     idea_index_by_opp: dict[uuid.UUID, int] = field(default_factory=dict)
     pending_price_claims: dict[tuple[uuid.UUID, str], uuid.UUID] = field(default_factory=dict)
@@ -95,38 +100,106 @@ class PipelineContext:
         if await repo.is_cancel_requested(self.session, self.run_id):
             raise PipelineCancelled()
 
+    def _limits(self) -> dict[str, Any]:
+        return dict(self.config.get("limits") or {})
+
+    def _model_for(self, role: str) -> str | None:
+        return self.model_by_role.get(role, self.model)
+
+    async def _call_with_retries(self, call: Any) -> Any:
+        """Reintenta solo errores transitorios (429/5xx/timeout) con backoff
+        exponencial y jitter, respetando Retry-After (9.2). Nunca reintenta
+        errores de autenticación ni de validación."""
+        import random
+
+        max_retries = int(self._limits().get("max_retries_per_stage", 0))
+        for attempt in range(max_retries + 1):
+            try:
+                return await call()
+            except ProviderError as exc:
+                if not exc.transient or attempt >= max_retries:
+                    raise
+                delay = min(exc.retry_after or (2.0**attempt), 30.0)
+                delay *= random.uniform(0.5, 1.5)  # noqa: S311
+                await self.event(
+                    "provider_retry",
+                    f"Reintento {attempt + 1}/{max_retries} tras error transitorio",
+                    level="warning",
+                    payload={"attempt": attempt + 1, "delay_s": round(delay, 2)},
+                )
+                await asyncio.sleep(delay)
+        raise AssertionError("unreachable")  # pragma: no cover
+
     async def do_research(
-        self, role: str, input_text: str, *, searches: int, opp: uuid.UUID | None = None
+        self,
+        role: str,
+        input_text: str,
+        *,
+        searches: int,
+        opp: uuid.UUID | None = None,
+        charge_reserve: bool = False,
     ) -> Any:
         from bore.providers.contracts import ResearchResult
 
         assert self.stage is not None
-        self.budget.check_before_call(web_searches=searches)
-        self.budget.search_budget_remaining = max(0, self.budget.search_budget_remaining)
+        await self.check_cancel()
+        model = self._model_for(role)
+        self.budget.check_before_call(
+            model=model,
+            web_searches=searches,
+            est_input_tokens=int(self._limits().get("est_input_tokens", 3000)),
+            max_output_tokens=int(self._limits().get("max_output_tokens", 2000)),
+            from_reserve=charge_reserve,
+        )
         task = ResearchTask(
             role=role,
             stage=self.stage.value,
-            instructions=f"Investiga y devuelve fuentes. {input_text}",
+            instructions=render_prompt(
+                role,
+                {
+                    "sector": self.config["sector"],
+                    "country": self.config["country"],
+                    "language": self.config["language"],
+                },
+            ),
             input_text=input_text,
             country=self.config["country"],
             language=self.config["language"],
             opportunity_id=str(opp) if opp else None,
+            max_web_search_calls=searches,
         )
-        result: ResearchResult = await self.research.research(task)
+        result: ResearchResult = await self._call_with_retries(lambda: self.research.research(task))
         await self._record_call(result.usage, role, opp, "ok")
+        self.budget.spend_stage_searches(result.usage.web_search_calls)
+        if charge_reserve:
+            self.budget.spend_reserve(opp, result.usage.web_search_calls)
         return result
 
     async def do_analysis(self, role: str, input_text: str, *, opp: uuid.UUID | None = None) -> Any:
         assert self.stage is not None
-        self.budget.check_before_call(web_searches=0)
+        await self.check_cancel()
+        model = self._model_for(role)
+        self.budget.check_before_call(
+            model=model,
+            web_searches=0,
+            est_input_tokens=int(self._limits().get("est_input_tokens", 3000)),
+            max_output_tokens=int(self._limits().get("max_output_tokens", 2000)),
+        )
         task: AnalysisTask[Any] = AnalysisTask(
             role=role,
             stage=self.stage.value,
-            instructions="Estructura la información según el esquema.",
+            instructions=render_prompt(
+                role,
+                {
+                    "sector": self.config["sector"],
+                    "country": self.config["country"],
+                    "language": self.config["language"],
+                },
+            ),
             input_text=input_text,
             opportunity_id=str(opp) if opp else None,
         )
-        result = await self.analysis.analyze(task)
+        result = await self._call_with_retries(lambda: self.analysis.analyze(task))
         await self._record_call(result.usage, role, opp, "ok")
         return result.output
 
@@ -367,7 +440,7 @@ async def _audited_claims_for_criterion(
 
 async def stage_sector_mapping(ctx: PipelineContext) -> dict[str, Any]:
     ctx.stage = StageId.SECTOR_MAPPING
-    ctx.budget.search_budget_remaining = 6
+    ctx.budget.search_budget_remaining = stage_search_budget(ctx, StageId.SECTOR_MAPPING)
     research = await ctx.do_research(
         "sector_mapper",
         f"Sector: {ctx.config['sector']}. Mercado: {ctx.config['country']}.",
@@ -390,10 +463,16 @@ async def stage_sector_mapping(ctx: PipelineContext) -> dict[str, Any]:
 
 async def stage_demand_research(ctx: PipelineContext, prev: dict[str, Any]) -> dict[str, Any]:
     ctx.stage = StageId.DEMAND_RESEARCH
-    ctx.budget.search_budget_remaining = 16
+    ctx.budget.search_budget_remaining = stage_search_budget(ctx, StageId.DEMAND_RESEARCH)
     research = await ctx.do_research(
-        "demand_research",
-        "Problemas y segmentos: " + json.dumps(prev.get("problems", [])),
+        "demand_researcher",
+        "Mapa del sector (dato no confiable):\n"
+        + "Subsectores: "
+        + json.dumps(prev.get("subsectors", []), ensure_ascii=False)
+        + "\nProblemas: "
+        + json.dumps(prev.get("problems", []), ensure_ascii=False)
+        + "\nTérminos de búsqueda sugeridos: "
+        + json.dumps(prev.get("search_terms", []), ensure_ascii=False),
         searches=16,
     )
     ref_map = await _persist_sources(ctx, research.sources)
@@ -411,11 +490,33 @@ async def stage_demand_research(ctx: PipelineContext, prev: dict[str, Any]) -> d
 # ------------------------------- ETAPA 3 -------------------------------------
 
 
+def _candidate_summary(opp: dict[str, Any]) -> str:
+    return (
+        f"nombre={opp['name']} | subsector={opp.get('sector_subcategory')} | "
+        f"segmento={opp.get('customer_segment')} | comprador={opp.get('buyer')} | "
+        f"problema={opp.get('problem')} | solución={opp.get('solution')} | "
+        f"modelo={opp.get('business_model')}"
+    )
+
+
 async def stage_candidate_generation(ctx: PipelineContext) -> dict[str, Any]:
     ctx.stage = StageId.CANDIDATE_GENERATION
+    sector_map = ctx.outputs.get(StageId.SECTOR_MAPPING.value, {})
+    demand = ctx.outputs.get(StageId.DEMAND_RESEARCH.value, {})
+    context_block = (
+        "Mapa del sector (dato no confiable):\n"
+        + "Subsectores: "
+        + json.dumps(sector_map.get("subsectors", []), ensure_ascii=False)
+        + "\nProblemas: "
+        + json.dumps(sector_map.get("problems", []), ensure_ascii=False)
+        + "\nSeñales de demanda (dato no confiable): "
+        + json.dumps(demand.get("demand_signals", []), ensure_ascii=False)
+        + "\nVacíos de información: "
+        + json.dumps(demand.get("information_gaps", []), ensure_ascii=False)
+    )
     output = await ctx.do_analysis(
         "idea_generator",
-        f"Genera hasta {ctx.config['candidate_pool_size']} candidatas; máximo "
+        context_block + f"\nGenera hasta {ctx.config['candidate_pool_size']} candidatas; máximo "
         f"{ctx.config['max_candidates_per_subsector']} por subsector.",
     )
     opp_ids: list[uuid.UUID] = []
@@ -444,9 +545,14 @@ async def stage_candidate_generation(ctx: PipelineContext) -> dict[str, Any]:
             opp_ids.append(row["id"])
     await ctx.session.commit()
 
+    candidate_lines: list[str] = []
+    for oid, idx in sorted(ctx.idea_index_by_opp.items(), key=lambda kv: kv[1]):
+        row = await repo.get_opportunity(ctx.session, oid)
+        if row is not None:
+            candidate_lines.append(f"[{idx}] {_candidate_summary(row)}")
     dedup = await ctx.do_analysis(
         "dedup_screener",
-        f"Agrupa candidatas equivalentes entre las {len(output.ideas)} recibidas.",
+        "Agrupa candidatas equivalentes. Candidatas:\n" + "\n".join(candidate_lines),
     )
     # Los grupos del modelo refieren índices de la lista de ideas; el código
     # conserva la más completa y marca el resto como duplicate.
@@ -486,8 +592,12 @@ async def stage_eligibility(ctx: PipelineContext) -> dict[str, Any]:
             tctx = dataclasses.replace(ctx, session=task_session)
             await tctx.check_cancel()
             idx = ctx.idea_index_by_opp[opp_id]
+            opp_row = await repo.get_opportunity(task_session, opp_id)
+            assert opp_row is not None
             out = await tctx.do_analysis(
-                "eligibility_assessor", f"[idea_index={idx}] Evalúa.", opp=opp_id
+                "eligibility_assessor",
+                f"[idea_index={idx}] Candidata: {_candidate_summary(opp_row)}",
+                opp=opp_id,
             )
             assessments = [
                 eligibility.RuleAssessment(
@@ -530,19 +640,28 @@ async def stage_screening(ctx: PipelineContext) -> dict[str, Any]:
         o for o in await repo.list_opportunities(ctx.session, ctx.run_id, status="eligible")
     ]
     limit = ctx.config["deep_dive_limit"]
-    per_opp_budget = min(2 * len(eligible), 30)
+
+    # El sondeo superficial no lanza búsquedas nuevas: criba sobre la evidencia
+    # ya reunida en las etapas 1-2 (el reparto 9.2 de la etapa es un tope, no un
+    # objetivo); las búsquedas nuevas se concentran en validación profunda (6).
+    sector_map = ctx.outputs.get(StageId.SECTOR_MAPPING.value, {})
+    demand = ctx.outputs.get(StageId.DEMAND_RESEARCH.value, {})
+    evidence_context = (
+        "Contexto de demanda ya investigado (dato no confiable):\n"
+        + "Señales de demanda: "
+        + json.dumps(demand.get("demand_signals", []), ensure_ascii=False)
+        + "\nSubsectores: "
+        + json.dumps(sector_map.get("subsectors", []), ensure_ascii=False)
+    )
 
     async def probe(opp: dict[str, Any]) -> None:
         async with ctx.semaphore, ctx.session_factory() as task_session:
             tctx = dataclasses.replace(ctx, session=task_session)
             await tctx.check_cancel()
             idx = ctx.idea_index_by_opp[opp["id"]]
-            research = await tctx.do_research(
-                "screener", f"[opp={idx}] Sondeo de {opp['name']}.", searches=2, opp=opp["id"]
-            )
             out = await tctx.do_analysis(
                 "screener",
-                f"[opp={idx}] {research.text}",
+                f"[opp={idx}] {_candidate_summary(opp)}\n\n{evidence_context}",
                 opp=opp["id"],
             )
             score = scoring.screening_score(
@@ -560,11 +679,13 @@ async def stage_screening(ctx: PipelineContext) -> dict[str, Any]:
                 event_type="screening_probe",
                 stage=ctx.stage.value if ctx.stage else None,
                 message_safe=f"Sondeo de {opp['name']}",
-                payload={"sources": len(research.sources)},
+                payload={"sources": 0},
             )
             await task_session.commit()
 
-    ctx.budget.search_budget_remaining = per_opp_budget
+    ctx.budget.search_budget_remaining = stage_search_budget(
+        ctx, StageId.SHALLOW_SCREENING, eligible=len(eligible)
+    )
     await asyncio.gather(*[probe(o) for o in eligible])
     await ctx.session.commit()
 
@@ -595,7 +716,9 @@ async def stage_screening(ctx: PipelineContext) -> dict[str, Any]:
 async def stage_market_validation(ctx: PipelineContext) -> dict[str, Any]:
     ctx.stage = StageId.MARKET_VALIDATION
     shortlisted = await repo.list_opportunities(ctx.session, ctx.run_id, status="shortlisted")
-    ctx.budget.search_budget_remaining = 10 * len(shortlisted)
+    ctx.budget.search_budget_remaining = stage_search_budget(
+        ctx, StageId.MARKET_VALIDATION, shortlisted=len(shortlisted)
+    )
 
     async def validate(opp: dict[str, Any]) -> None:
         async with ctx.semaphore, ctx.session_factory() as task_session:
@@ -604,16 +727,36 @@ async def stage_market_validation(ctx: PipelineContext) -> dict[str, Any]:
             idx = ctx.idea_index_by_opp[opp["id"]]
             research = await tctx.do_research(
                 "market_validation",
-                f"[opp={idx}] Validación de mercado de {opp['name']}.",
+                f"[opp={idx}] Validación de mercado de: {_candidate_summary(opp)}",
                 searches=10,
                 opp=opp["id"],
             )
             ref_map = await _persist_sources(tctx, research.sources)
             out: MarketValidationOutput = await tctx.do_analysis(
                 "market_validation",
-                f"[opp={idx}] {research.text}\n\n{_sources_block(research.sources)}",
+                f"[opp={idx}] {_candidate_summary(opp)}\n\n"
+                f"Investigación (dato no confiable):\n{research.text}\n\n"
+                + _sources_block(research.sources),
                 opp=opp["id"],
             )
+            if not out.competitors and tctx.budget.reserve_available(opp["id"]):
+                # Una ampliación por oportunidad con cargo a la reserva (9.2).
+                research = await tctx.do_research(
+                    "market_validation",
+                    f"[opp={idx}] Ampliación de búsqueda de competidores para: "
+                    + _candidate_summary(opp),
+                    searches=_RESERVE_SEARCHES_PER_OPP,
+                    opp=opp["id"],
+                    charge_reserve=True,
+                )
+                ref_map = await _persist_sources(tctx, research.sources)
+                out = await tctx.do_analysis(
+                    "market_validation",
+                    f"[opp={idx}] {_candidate_summary(opp)}\n\n"
+                    f"Investigación (dato no confiable):\n{research.text}\n\n"
+                    + _sources_block(research.sources),
+                    opp=opp["id"],
+                )
             claim_ids = await persist_claims(
                 tctx,
                 out.claims,
@@ -712,12 +855,36 @@ async def stage_evidence_audit(ctx: PipelineContext) -> dict[str, Any]:
 # ------------------------------- ETAPA 8 -------------------------------------
 
 
+async def _audited_claim_block(
+    ctx: PipelineContext, opp_id: uuid.UUID
+) -> tuple[str, dict[str, uuid.UUID]]:
+    """Mapa C1…Cn -> claim_id con el contenido real auditado que recibe el
+    CriterionAssessor (4.1): texto, tipo, criterio, estado y disputa."""
+    claims = await repo.list_claims(ctx.session, ctx.run_id, opportunity_id=opp_id)
+    claims = sorted(claims, key=lambda c: (c["stage"], c["text"]))
+    lines: list[str] = []
+    ref_map: dict[str, uuid.UUID] = {}
+    for i, c in enumerate(claims, start=1):
+        ref = f"C{i}"
+        ref_map[ref] = c["id"]
+        lines.append(
+            f"{ref} | criterion={c['criterion_code']} | kind={c['kind']} | "
+            f"status={c['verification_status']} | disputed={str(c['disputed']).lower()}"
+            f": {c['text']}"
+        )
+    return "Afirmaciones auditadas:\n" + "\n".join(lines), ref_map
+
+
 async def _score_once(
     ctx: PipelineContext, opp_id: uuid.UUID, revision: str
 ) -> dict[str, int] | None:
     idx = ctx.idea_index_by_opp.get(opp_id)
-    marker = f"[opp={idx}][revision={revision}]"
-    out: CriterionAssessmentOutput = await ctx.do_analysis("criterion_assessor", marker, opp=opp_id)
+    block, claim_refs = await _audited_claim_block(ctx, opp_id)
+    out: CriterionAssessmentOutput = await ctx.do_analysis(
+        "criterion_assessor",
+        f"[opp={idx}][revision={revision}]\n{block}",
+        opp=opp_id,
+    )
     scores: dict[str, int] = {}
     per_conf: dict[str, Any] = {}
     for item in out.scores:
@@ -738,21 +905,34 @@ async def _score_once(
             unknowns=item.unknowns,
             revision=revision,
         )
-        if revision == "final" and score is not None and item.score != score:
-            await repo.update_criterion_score(ctx.session, row["id"], score=score)
+        # Solo las afirmaciones citadas por el evaluador, validadas contra el
+        # mapa C1…Cn de ESTA oportunidad.
+        claims = await repo.list_claims(ctx.session, ctx.run_id, opportunity_id=opp_id)
+        claims_status = {str(c["id"]): c for c in claims}
+        for citation in item.claims:
+            claim_id = claim_refs.get(citation.ref)
+            if claim_id is None:
+                await ctx.event(
+                    "unknown_claim_ref",
+                    f"Referencia de afirmación desconocida descartada: {citation.ref}",
+                    level="warning",
+                    payload={"ref": citation.ref, "criterion": item.criterion},
+                )
+                continue
+            cited = claims_status[str(claim_id)]
+            forced = (
+                cited["verification_status"] == VerificationStatus.CONTRADICTED.value
+                or cited["disputed"]
+            )
+            role = (
+                ClaimSourceRole.COUNTEREVIDENCE.value
+                if forced or citation.role == "counterevidence"
+                else ClaimSourceRole.EVIDENCE.value
+            )
+            await repo.insert_score_claim(ctx.session, row["id"], claim_id, role)
         if score is None:
             continue
         scores[item.criterion] = score
-        claims = await repo.list_claims(ctx.session, ctx.run_id, opportunity_id=opp_id)
-        for c in claims:
-            if c["criterion_code"] == item.criterion:
-                role = (
-                    ClaimSourceRole.COUNTEREVIDENCE.value
-                    if c["verification_status"] == VerificationStatus.CONTRADICTED.value
-                    or c["disputed"]
-                    else ClaimSourceRole.EVIDENCE.value
-                )
-                await repo.insert_score_claim(ctx.session, row["id"], c["id"], role)
     if set(scores) != set(scoring.WEIGHTS):
         return None
     from bore.domain.enums import Confidence
@@ -800,22 +980,29 @@ async def stage_adversarial_review(
     )
     to_review = ordered[: ctx.config["review_limit"]]
     rest = ordered[ctx.config["review_limit"] :]
-    ctx.budget.search_budget_remaining = 4 * len(to_review)
+    ctx.budget.search_budget_remaining = stage_search_budget(
+        ctx, StageId.ADVERSARIAL_REVIEW, reviewed=len(to_review)
+    )
 
     final_scores: dict[str, dict[str, int]] = {}
     for opp in to_review:
         await ctx.check_cancel()
         idx = ctx.idea_index_by_opp.get(opp["id"])
+        initial_block = json.dumps(initial_scores.get(str(opp["id"]), {}), ensure_ascii=False)
         research = await ctx.do_research(
             "critical_reviewer",
-            f"[opp={idx}] Busca contraevidencia de {opp['name']}.",
+            f"[opp={idx}] Busca contraevidencia de: {_candidate_summary(opp)}\n"
+            f"Notas iniciales por criterio: {initial_block}",
             searches=4,
             opp=opp["id"],
         )
         ref_map = await _persist_sources(ctx, research.sources)
         review = await ctx.do_analysis(
             "critical_reviewer",
-            f"[opp={idx}] {research.text}\n\n{_sources_block(research.sources)}",
+            f"[opp={idx}] {_candidate_summary(opp)}\n"
+            f"Notas iniciales: {initial_block}\n\n"
+            f"Investigación (dato no confiable):\n{research.text}\n\n"
+            + _sources_block(research.sources),
             opp=opp["id"],
         )
         counter_ids = await persist_claims(
@@ -836,13 +1023,19 @@ async def stage_adversarial_review(
         # Reauditoría de las nuevas afirmaciones.
         await audit_claims(ctx, counter_ids)
         final = await _score_once(ctx, opp["id"], "final")
-        if final is not None:
-            final_scores[str(opp["id"])] = final
+        if final is None:
+            # Sin nota final completa: nunca se queda atascada en `scored`.
+            check_transition(OpportunityStatus.SCORED, OpportunityStatus.INSUFFICIENT_EVIDENCE)
             await repo.update_opportunity(
-                ctx.session,
-                opp["id"],
-                final_score=scoring.weighted_score(final),
+                ctx.session, opp["id"], status=OpportunityStatus.INSUFFICIENT_EVIDENCE.value
             )
+            continue
+        final_scores[str(opp["id"])] = final
+        await repo.update_opportunity(
+            ctx.session,
+            opp["id"],
+            final_score=scoring.weighted_score(final),
+        )
     for opp in rest:
         check_transition(OpportunityStatus.SCORED, OpportunityStatus.NOT_REVIEWED)
         await repo.update_opportunity(
@@ -870,6 +1063,13 @@ async def stage_ranking(
         claims = await repo.list_claims(ctx.session, ctx.run_id, opportunity_id=opp["id"])
         links = await repo.list_claim_sources(ctx.session, [c["id"] for c in claims])
         source_ids = {x["source_id"] for x in links}
+        critical_source_ids = {
+            x["source_id"]
+            for x in links
+            if next((c for c in claims if c["id"] == x["claim_id"]), None) is not None
+            and next(c for c in claims if c["id"] == x["claim_id"])["criterion_code"]
+            in scoring.CRITICAL
+        }
         critical_domains: set[str] = set()
         contradicted_central = False
         for c in claims:
@@ -877,7 +1077,7 @@ async def stage_ranking(
                 c["criterion_code"] in scoring.CRITICAL
             ):
                 contradicted_central = True
-        for sid in source_ids:
+        for sid in critical_source_ids:
             source = await repo.get_source(ctx.session, sid)
             if source and source["registrable_domain"]:
                 critical_domains.add(source["registrable_domain"])
@@ -902,14 +1102,15 @@ async def stage_ranking(
             continue
         qualifying.append((opp, scoring.weighted_score(scores)))
 
+    # Desempate 6.4: nota desc, confianza desc, demand desc, generated_at ASC.
     confidence_rank = {"high": 2, "medium": 1, "low": 0, None: -1}
     qualifying.sort(
         key=lambda pair: (
-            pair[1],
-            confidence_rank.get(pair[0]["confidence"], -1),
-            final_scores[str(pair[0]["id"])]["demand"],
-        ),
-        reverse=True,
+            -pair[1],
+            -confidence_rank.get(pair[0]["confidence"], -1),
+            -final_scores[str(pair[0]["id"])]["demand"],
+            pair[0]["generated_at"],
+        )
     )
     published = 0
     for rank, (opp, score) in enumerate(qualifying, start=1):
@@ -924,6 +1125,28 @@ async def stage_ranking(
             rank=rank,
         )
         published += 1
+    # Las cualificadas que exceden requested_ideas se quedan en `scored` y se
+    # exponen como `qualified_not_published` (ver DECISIONS, D13).
+    qualified_not_published = len(qualifying) - published
     await ctx.session.commit()
     stats = await repo.opportunity_status_counts(ctx.session, ctx.run_id)
+    stats["qualified_not_published"] = qualified_not_published
+    await _assert_terminal_invariants(ctx, qualified_not_published)
     return {"published": published, "statistics": stats}
+
+
+async def _assert_terminal_invariants(ctx: PipelineContext, qualified_not_published: int) -> None:
+    """Invariante final: nada queda en candidate/eligible/shortlisted y `scored`
+    solo describe a cualificadas no publicadas."""
+    counts = await repo.opportunity_status_counts(ctx.session, ctx.run_id)
+    stuck = {s: counts.get(s, 0) for s in ("candidate", "eligible", "shortlisted")}
+    stuck = {s: n for s, n in stuck.items() if n}
+    scored_left = counts.get("scored", 0)
+    if stuck or scored_left != qualified_not_published:
+        await ctx.event(
+            "invariant_violation",
+            "Invariante de estados finales incumplido",
+            level="error",
+            payload={"stuck": stuck, "scored": scored_left},
+        )
+        raise RuntimeError(f"Invariante final incumplido: {stuck} scored={scored_left}")

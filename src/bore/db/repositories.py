@@ -127,6 +127,15 @@ async def runs_without_heartbeat(s: AsyncSession, *, older_than: datetime) -> li
     return [_row_dict(r) for r in (await s.execute(q)).all()]
 
 
+async def orphan_queued_runs(s: AsyncSession, *, older_than: datetime) -> list[dict[str, Any]]:
+    """Ejecuciones `queued` más antiguas que el umbral (posibles olvidadas)."""
+    q = sa.select(t.research_runs).where(
+        t.research_runs.c.status == "queued",
+        t.research_runs.c.created_at < older_than,
+    )
+    return [_row_dict(r) for r in (await s.execute(q)).all()]
+
+
 async def recompute_run_costs(s: AsyncSession, run_id: uuid.UUID) -> None:
     """Los totales de research_runs se derivan de provider_calls."""
     q = sa.select(
@@ -146,7 +155,7 @@ async def recompute_run_costs(s: AsyncSession, run_id: uuid.UUID) -> None:
         tokens_output=tout,
         web_search_calls=wsc,
         model_calls=reqs,
-        cost_estimated=bool(estimated),
+        cost_is_estimated=bool(estimated),
     )
 
 

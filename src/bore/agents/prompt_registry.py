@@ -18,6 +18,14 @@ PROMPT_FILES: dict[str, str] = {
     "dedup_screener": "dedup_screener.md",
 }
 
+# Alias de papeles operativos a su fichero de prompt (modo sondeo y fusión de
+# analistas de market_validation en un solo papel de proveedor).
+PROMPT_ALIASES: dict[str, str] = {
+    "demand_research": "demand_researcher",
+    "screener": "demand_researcher",
+    "market_validation": "competition_researcher",
+}
+
 
 def render_prompt(role: str, context: dict[str, str] | None = None) -> str:
     """Devuelve el prompt del papel con el contexto sustituido.
@@ -25,7 +33,7 @@ def render_prompt(role: str, context: dict[str, str] | None = None) -> str:
     Nunca incluye el umbral de publicación, los pesos ni `requested_ideas`
     (evaluadores ciegos, principio 7 de la spec).
     """
-    filename = PROMPT_FILES[role]
+    filename = PROMPT_FILES[PROMPT_ALIASES.get(role, role)]
     text = resources.files("bore.agents.prompts").joinpath(filename).read_text(encoding="utf-8")
     if context:
         for key, value in context.items():

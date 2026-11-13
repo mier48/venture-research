@@ -23,7 +23,7 @@ async def export_json(session: AsyncSession, run: dict[str, Any]) -> str:
             "statistics": stats,
             "cost": {
                 "actual_usd": float(run["actual_cost_usd"] or 0),
-                "estimated": bool(run["cost_estimated"]),
+                "estimated": bool(run["cost_is_estimated"]),
                 "web_search_calls": run["web_search_calls"],
                 "model_calls": run["model_calls"],
             },

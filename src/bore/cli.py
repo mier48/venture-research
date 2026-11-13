@@ -173,21 +173,44 @@ async def _demo() -> None:
 
 @app.command()
 def worker() -> None:
-    """Arranca el worker RQ (solo en el contenedor Linux) tras marcar huérfanas."""
+    """Arranca el worker RQ (solo en el contenedor Linux): comprobación de modo
+    real, mantenimiento de huérfanas y reaper periódico (9.4)."""
+    import threading
+
     from bore.db.session import init_engine
+    from bore.orchestration import jobs
+    from bore.providers.openai_research import check_models_exist, missing_real_mode_config
 
     settings = get_settings()
     init_engine(settings.database_url)
+    if settings.openai_api_key:
+        missing = missing_real_mode_config(settings)
+        if missing:
+            typer.echo("Modo real mal configurado: " + "; ".join(missing), err=True)
+            raise typer.Exit(2)
+        problems = check_models_exist(settings)
+        if problems:
+            typer.echo(
+                "Modelos no disponibles en el proveedor: " + "; ".join(problems),
+                err=True,
+            )
+            raise typer.Exit(2)
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(_startup())
+    stop = threading.Event()
+    reaper = threading.Thread(target=jobs.reaper_loop, args=(stop,), daemon=True)
+    reaper.start()
     import redis as redis_lib
     from rq import Worker
 
     conn = redis_lib.Redis.from_url(settings.redis_url)
     w = Worker(["bore"], connection=conn)
     typer.echo("Worker RQ en marcha (cola 'bore')")
-    w.work(with_scheduler=False)
+    try:
+        w.work(with_scheduler=False)
+    finally:
+        stop.set()
 
 
 async def _startup() -> None:

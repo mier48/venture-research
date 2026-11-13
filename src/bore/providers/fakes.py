@@ -16,6 +16,7 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from bore.agents.schemas import (
+    ClaimCitation,
     CompetitorInfo,
     CriterionAssessmentOutput,
     CriterionScore,
@@ -402,8 +403,33 @@ _FINAL_SCORES: dict[int, dict[str, int]] = {
 }
 
 
-def _scores_output(opp: int, revision: str) -> CriterionAssessmentOutput:
+_CLAIM_LINE_RE = re.compile(
+    r"^(C\d+) \| criterion=(\w+) \| kind=(\w+) \| status=(\w+) \| disputed=(\w+)"
+)
+
+
+def _citations_from_block(task_input: str, criterion: str) -> list[ClaimCitation]:
+    """Cita las afirmaciones C1…Cn del bloque real recibido, por criterio."""
+    out: list[ClaimCitation] = []
+    for line in task_input.splitlines():
+        m = _CLAIM_LINE_RE.match(line.strip())
+        if not m or m.group(2) != criterion:
+            continue
+        adverse = m.group(4) == "contradicted" or m.group(5) == "true"
+        out.append(ClaimCitation(ref=m.group(1), role="counterevidence" if adverse else "evidence"))
+    return out
+
+
+def _scores_output(
+    opp: int,
+    revision: str,
+    task_input: str = "",
+    omit_final_criteria: frozenset[int] = frozenset(),
+) -> CriterionAssessmentOutput:
     scores = _FINAL_SCORES[opp] if revision == "final" else _INITIAL_SCORES[opp]
+    if revision == "final" and opp in omit_final_criteria:
+        # Escenario inyectable: el evaluador no produce todos los criterios.
+        scores = {k: v for k, v in scores.items() if k != "demand"}
     return CriterionAssessmentOutput(
         scores=[
             CriterionScore(
@@ -411,6 +437,7 @@ def _scores_output(opp: int, revision: str) -> CriterionAssessmentOutput:
                 score=scores[c],
                 rationale=f"Justificación de ejemplo para {c} (idea {opp}).",
                 unknowns=["Dato de ejemplo pendiente"],
+                claims=_citations_from_block(task_input, c),
             )
             for c in scores
         ]
@@ -490,10 +517,27 @@ def _review(opp: int) -> CriticalReviewOutput:
     )
 
 
+class _Failures:
+    """Errores inyectables para tests: papel -> cola de excepciones."""
+
+    def __init__(self, spec: dict[str, list[Exception]] | None = None) -> None:
+        self._spec = {k: list(v) for k, v in (spec or {}).items()}
+
+    def maybe_raise(self, role: str) -> None:
+        for key in (role, "*"):
+            queue = self._spec.get(key)
+            if queue:
+                raise queue.pop(0)
+
+
 class FakeResearchProvider:
     """Investigación simulada: fuentes sintéticas del registro en memoria."""
 
+    def __init__(self, failures: _Failures | None = None) -> None:
+        self._failures = failures or _Failures()
+
     async def research(self, task: ResearchTask) -> ResearchResult:
+        self._failures.maybe_raise(task.role)
         sources: list[ProviderSource]
         opp = _marker(task.input_text, "opp")
         if opp is not None:
@@ -534,7 +578,16 @@ class FakeResearchProvider:
 class FakeAnalysisProvider:
     """Estructuración simulada: salidas tipadas deterministas por papel."""
 
+    def __init__(
+        self,
+        failures: _Failures | None = None,
+        omit_final_criteria: frozenset[int] = frozenset(),
+    ) -> None:
+        self._failures = failures or _Failures()
+        self._omit_final_criteria = omit_final_criteria
+
     async def analyze(self, task: AnalysisTask[T]) -> AnalysisResult[T]:
+        self._failures.maybe_raise(task.role)
         output: BaseModel
         role = task.role
         if role == "sector_mapper":
@@ -616,7 +669,7 @@ class FakeAnalysisProvider:
             opp = _marker(task.input_text, "opp")
             assert opp is not None
             revision = "final" if "[revision=final]" in task.input_text else "initial"
-            output = _scores_output(opp, revision)
+            output = _scores_output(opp, revision, task.input_text, self._omit_final_criteria)
         elif role == "critical_reviewer":
             opp = _marker(task.input_text, "opp")
             assert opp is not None
@@ -662,5 +715,18 @@ class FakeSourceVerifier:
         )
 
 
-def make_fake_providers() -> tuple[FakeResearchProvider, FakeAnalysisProvider, FakeSourceVerifier]:
-    return FakeResearchProvider(), FakeAnalysisProvider(), FakeSourceVerifier()
+def make_fake_providers(
+    failures: dict[str, list[Exception]] | None = None,
+    *,
+    omit_final_criteria: frozenset[int] = frozenset(),
+) -> tuple[FakeResearchProvider, FakeAnalysisProvider, FakeSourceVerifier]:
+    """`failures`: papel -> cola de excepciones lanzadas en llamadas sucesivas
+    (escenarios de fallo inyectables para tests, p. ej. ProviderServerError).
+    `omit_final_criteria`: índices de candidata cuya nota final omite un
+    criterio (escenario `scored` -> `insufficient_evidence`)."""
+    shared = _Failures(failures)
+    return (
+        FakeResearchProvider(shared),
+        FakeAnalysisProvider(shared, omit_final_criteria),
+        FakeSourceVerifier(),
+    )

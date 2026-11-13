@@ -49,7 +49,7 @@ async def export_markdown(session: AsyncSession, run: dict[str, Any]) -> str:
         f"- Rúbrica: {_esc(run['rubric_version'])} · Prompts: {_esc(run['prompt_version'])}"
         f" · Tarifas: {_esc(run['pricing_version'])}",
         f"- Coste real: {run['actual_cost_usd'] or 0} USD"
-        + (" (estimado)" if run["cost_estimated"] else ""),
+        + (" (estimado)" if run["cost_is_estimated"] else ""),
         "",
         "**Advertencia**: la nota prioriza líneas de investigación; no demuestra "
         "rentabilidad ni disposición real a pagar.",

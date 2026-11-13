@@ -117,20 +117,26 @@ def claim_verification_status(
     for link in links:
         if not is_provider_provenance(link.provenance, allow_synthetic=allow_synthetic):
             continue
-        provider_cited = True
+        # Solo los vínculos «supports» cuentan como citada como respaldo; un
+        # «mentions» no aporta nada sin veredicto explícito del juez.
+        if link.support_type == "supports":
+            provider_cited = True
         if link.access_status not in _ACCESSIBLE:
             continue
-        if link.judge_verdict is JudgeVerdict.CONTRADICTS or (
-            link.support_type == "contradicts" and link.quote_match
-        ):
+        if link.judge_verdict is JudgeVerdict.CONTRADICTS:
             confirmed_contradiction = True
-            continue
-        if link.quote_match or link.judge_verdict is JudgeVerdict.SUPPORTS:
+        elif link.judge_verdict is JudgeVerdict.SUPPORTS:
             confirmed_support = True
+        elif link.quote_match:
+            if link.support_type == "supports":
+                confirmed_support = True
+            elif link.support_type == "contradicts":
+                confirmed_contradiction = True
 
-    disputed = confirmed_support and confirmed_contradiction
+    if confirmed_support and confirmed_contradiction:
+        return VerificationStatus.PARTIALLY_SUPPORTED, True
     if confirmed_support:
-        return VerificationStatus.VERIFIED, disputed
+        return VerificationStatus.VERIFIED, False
     if confirmed_contradiction:
         return VerificationStatus.CONTRADICTED, False
     if provider_cited:

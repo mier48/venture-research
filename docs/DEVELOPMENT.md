@@ -56,3 +56,14 @@ BORE_TEST_REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest -q tests/integration
 - psycopg async no admite el ProactorEventLoop de Windows: `jobs.asyncio_run` y la CLI fijan `WindowsSelectorEventLoopPolicy` en win32.
 - El worker RQ solo corre en el contenedor (`bore worker`): marca huérfanas antes de `rq.Worker`.
 - `config/pricing.toml`: solo el precio real de búsqueda web (10 USD/1.000); modelos ausentes → coste estimado con tarifa `fallback` etiquetada.
+
+## Fase 2: OpenAI real y verificador HTTP
+
+Modo real (`offline=false`) requiere `OPENAI_API_KEY` + `BORE_MODEL_RESEARCH`/`BORE_MODEL_ANALYSIS`/`BORE_MODEL_REVIEW`. El worker valida la configuración al arrancar cada trabajo y `client.models.retrieve` comprueba que el modelo existe; la compatibilidad con web search no se garantiza hasta la primera llamada (un fallo se traduce a `provider_error`).
+
+Tests externos de humo (consumen llamadas de pago, desactivados por defecto):
+
+    OPENAI_API_KEY=... BORE_ALLOW_PAID_SMOKE=1 BORE_MODEL_RESEARCH=... \
+      uv run pytest -m integration_external
+
+`HttpSourceVerifier` implementa anti-SSRF (DNS + IP prohibida por salto, máx. 5 redirects, tope de tamaño, robots, ≤1 req/s/host). Riesgo residual documentado en DECISIONS D18 (TOCTOU de DNS rebinding).

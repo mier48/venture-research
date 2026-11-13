@@ -55,13 +55,48 @@ def test_contradicted():
     assert st == VerificationStatus.CONTRADICTED and not disputed
 
 
-def test_disputed():
+def test_disputed_is_partially_supported():
+    """Respaldo y contradicción confirmados a la vez: partially_supported +
+    disputed (4.4), no verified."""
     st, disputed = claim_verification_status(
         [link(), link(qm=False, verdict=JudgeVerdict.CONTRADICTS)]
     )
-    assert st == VerificationStatus.VERIFIED and disputed
+    assert st == VerificationStatus.PARTIALLY_SUPPORTED and disputed
 
 
 def test_judge_supports_verifies():
     st, _ = claim_verification_status([link(qm=False, verdict=JudgeVerdict.SUPPORTS)])
     assert st == VerificationStatus.VERIFIED
+
+
+def test_quote_match_on_contradicts_link_confirms_contradiction():
+    st, _ = claim_verification_status([link(qm=True, st="contradicts")])
+    assert st == VerificationStatus.CONTRADICTED
+
+
+def test_mentions_link_counts_for_nothing():
+    st, _ = claim_verification_status([link(qm=True, st="mentions")])
+    assert st == VerificationStatus.UNVERIFIED
+
+
+def test_mentions_link_with_judge_verdict_counts():
+    st, _ = claim_verification_status(
+        [link(qm=False, verdict=JudgeVerdict.SUPPORTS, st="mentions")]
+    )
+    assert st == VerificationStatus.VERIFIED
+
+
+def test_contradicts_link_not_provider_cited():
+    """Un vínculo «contradicts» sin confirmación no vale como respaldo citado."""
+    st, _ = claim_verification_status([link(qm=False, st="contradicts")])
+    assert st == VerificationStatus.UNVERIFIED
+
+
+def test_supports_link_inaccessible_still_provider_cited():
+    st, _ = claim_verification_status([link(access=AccessStatus.BLOCKED, qm=False)])
+    assert st == VerificationStatus.PARTIALLY_SUPPORTED
+
+
+def test_support_and_quote_match_contradicts_is_disputed():
+    st, disputed = claim_verification_status([link(), link(qm=True, st="contradicts")])
+    assert st == VerificationStatus.PARTIALLY_SUPPORTED and disputed

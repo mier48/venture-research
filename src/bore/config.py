@@ -18,9 +18,21 @@ class Settings(BaseSettings):
     openai_agents_disable_tracing: bool = True
     bore_tracing_enabled: bool = False
     bore_trace_include_sensitive_data: bool = False
+    bore_search_context_size: str = "medium"
+    bore_agent_max_turns: int = 10
+    bore_heartbeat_stale_seconds: int = 120
+    bore_requeue_after_seconds: int = 300
+    bore_reaper_interval_seconds: int = 60
 
     bore_max_usd_per_day: float = 25.0
     bore_min_seconds_between_runs: int = 60
+
+    verifier_user_agent: str = "BORE-SourceVerifier/1.0 (+research bot)"
+    verifier_timeout_seconds: float = 15.0
+    verifier_max_bytes: int = 2 * 1024 * 1024
+    verifier_max_redirects: int = 5
+    verifier_respect_robots: bool = True
+    verifier_per_host_min_interval: float = 1.0
 
     bore_api_url: str = "http://127.0.0.1:8000"
     bore_allowed_hosts: str = "127.0.0.1,localhost,api,testserver"

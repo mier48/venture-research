@@ -43,13 +43,18 @@ async def create_run(
     session: AsyncSession = Depends(_session),  # noqa: B008
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> JSONResponse:
-    if not body.offline and not settings.openai_api_key:
-        raise ApiError(
-            503,
-            "provider_not_configured",
-            "Proveedor no configurado",
-            "Modo real sin OPENAI_API_KEY: usa offline=true o configura la clave.",
-        )
+    if not body.offline:
+        from bore.providers.openai_research import check_models_exist_cached
+
+        problems = await check_models_exist_cached(settings)
+        if problems:
+            raise ApiError(
+                503,
+                "provider_not_configured",
+                "Proveedor no configurado",
+                "Modo real no disponible: configura OPENAI_API_KEY y BORE_MODEL_* "
+                "o usa offline=true.",
+            )
     if await repo.count_active_runs(session) > 0:
         raise ApiError(
             409,
@@ -92,7 +97,9 @@ async def create_run(
     await session.commit()
     status = run["status"]
     try:
-        jobs.enqueue_run(run["id"], config, redis_url=settings.redis_url)
+        job = jobs.enqueue_run(run["id"], config, redis_url=settings.redis_url)
+        await repo.update_run(session, run["id"], rq_job_id=job.id)
+        await session.commit()
     except Exception:
         await repo.update_run(session, run["id"], status="failed", error_code="enqueue_failed")
         await session.commit()
@@ -158,7 +165,7 @@ async def run_detail(
         statistics=stats,
         cost={
             "actual_usd": float(run["actual_cost_usd"] or 0),
-            "estimated": bool(run["cost_estimated"]),
+            "estimated": bool(run["cost_is_estimated"]),
             "web_search_calls": run["web_search_calls"],
             "model_calls": run["model_calls"],
         },

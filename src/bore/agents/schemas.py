@@ -121,11 +121,19 @@ class EvidenceJudgeOutput(BaseModel):
     rationale: str = ""
 
 
+class ClaimCitation(BaseModel):
+    """Referencia del evaluador a una afirmación auditada (identificador C1…Cn
+    asignado por el código en la entrada)."""
+
+    ref: str
+    role: Literal["evidence", "counterevidence"] = "evidence"
+
+
 class CriterionScore(BaseModel):
     criterion: CriterionLiteral
     score: int | None = Field(default=None, ge=1, le=10)
     rationale: str = ""
-    claim_ids: list[str] = Field(default_factory=list)
+    claims: list[ClaimCitation] = Field(default_factory=list)
     unknowns: list[str] = Field(default_factory=list)
 
 

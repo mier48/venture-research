@@ -14,6 +14,13 @@ class LimitsSchema(BaseModel):
     max_model_calls: int = Field(default=200, ge=1, le=2000)
     max_duration_seconds: int = Field(default=5400, ge=60, le=14400)
     max_retries_per_stage: int = Field(default=2, ge=0, le=5)
+    # Comprobación previa de coste (9.2).
+    est_input_tokens: int = Field(default=3000, ge=0, le=1000000)
+    max_output_tokens: int = Field(default=2000, ge=1, le=200000)
+    # Reserva de ampliaciones de búsqueda (9.2).
+    search_reserve: int = Field(default=24, ge=0, le=200)
+    # Reparto de búsquedas por etapa (opcional; defecto tabla 9.2).
+    search_split: dict[str, int] | None = None
 
 
 class ResearchRunCreate(BaseModel):

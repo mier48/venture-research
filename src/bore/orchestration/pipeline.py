@@ -21,6 +21,7 @@ from bore.domain.enums import (
     StageId,
     StopReason,
 )
+from bore.orchestration import budgets as budgets_mod
 from bore.orchestration import stages
 from bore.orchestration.budgets import (
     BudgetExceeded,
@@ -33,6 +34,7 @@ from bore.providers.contracts import (
     ResearchProvider,
     SourceVerifier,
 )
+from bore.providers.errors import ProviderError
 
 HEARTBEAT_INTERVAL_SECONDS = 15
 
@@ -76,16 +78,23 @@ async def run_pipeline(
     analysis: AnalysisProvider,
     verifier: SourceVerifier,
     pricing: Pricing | None = None,
+    provider_name: str = "fake",
+    model_by_role: dict[str, str | None] | None = None,
 ) -> None:
     """Ejecuta el pipeline completo sobre una ejecución `queued`."""
     pricing = pricing or load_pricing()
     started = time.monotonic()
+    stage_outputs: dict[str, Any] = {}
     budget = BudgetManager(
         max_usd=Decimal(str(config["limits"]["max_usd"])),
         max_web_search_calls=config["limits"]["max_web_search_calls"],
         max_model_calls=config["limits"]["max_model_calls"],
         elapsed_seconds=lambda: time.monotonic() - started,
         max_duration_seconds=config["limits"]["max_duration_seconds"],
+        reserve_remaining=int(
+            config["limits"].get("search_reserve", budgets_mod.DEFAULT_SEARCH_SPLIT["reserve"])
+        ),
+        pricing=pricing,
     )
     ctx = stages.PipelineContext(
         session=session,
@@ -98,7 +107,10 @@ async def run_pipeline(
         verifier=verifier,
         budget=budget,
         pricing=pricing,
+        provider_name=provider_name,
+        model_by_role=model_by_role or {},
     )
+    ctx.outputs = stage_outputs  # definido abajo antes del bucle
 
     await repo.update_run(
         session,
@@ -112,7 +124,6 @@ async def run_pipeline(
     stop_heartbeat = asyncio.Event()
     heartbeat_task = asyncio.create_task(_heartbeat_loop(session_factory, run_id, stop_heartbeat))
 
-    stage_outputs: dict[str, Any] = {}
     final_status = RunStatus.COMPLETED.value
     stop_reason: str | None = None
     error_code: str | None = None
@@ -198,6 +209,27 @@ async def run_pipeline(
         final_status = RunStatus.PARTIAL.value
         stop_reason = exc.stop_reason.value
         error_msg = exc.detail
+        # Se clasifican y publican las que ya tengan nota final (9.2).
+        ctx.stage = StageId.RANKING_AND_REPORT
+        try:
+            await stages.stage_ranking(ctx, stage_outputs.get("final_scores", {}))
+            await session.commit()
+        except Exception as rank_exc:
+            await repo.insert_event(
+                session,
+                run_id,
+                level="warning",
+                event_type="ranking_after_cut_failed",
+                stage=StageId.RANKING_AND_REPORT.value,
+                message_safe=f"No se pudo clasificar tras el corte: {rank_exc}",
+                payload=None,
+            )
+            await session.commit()
+    except ProviderError as exc:
+        final_status = RunStatus.FAILED.value
+        stop_reason = StopReason.PROVIDER_ERROR.value
+        error_code = exc.error_code.value
+        error_msg = str(exc)[:500]
     except Exception as exc:
         final_status = RunStatus.FAILED.value
         error_code = ErrorCode.INTERNAL_ERROR.value
@@ -207,10 +239,15 @@ async def run_pipeline(
         heartbeat_task.cancel()
         ctx.stage = None
         await repo.recompute_run_costs(session, run_id)
+        extra: dict[str, Any] = {}
+        trace_id = getattr(research, "last_trace_id", None)
+        if trace_id:
+            extra["trace_id"] = trace_id
         await repo.update_run(
             session,
             run_id,
             status=final_status,
+            **extra,
             stop_reason=stop_reason,
             finished_at=datetime.now(UTC),
             heartbeat_at=datetime.now(UTC),

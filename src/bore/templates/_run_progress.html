@@ -2,7 +2,7 @@
 <p>Etapa: {{ run.current_stage or '—' }} · Progreso: {{ run.progress_percent }}%
 {% if run.stop_reason %} · Parada: {{ run.stop_reason }}{% endif %}
 {% if run.error_code %} · Error: {{ run.error_code }}{% endif %}</p>
-<p>Coste: {{ '%.4f'|format(run.actual_cost_usd or 0) }} USD{% if run.cost_estimated %} (estimado){% endif %}
+<p>Coste: {{ '%.4f'|format(run.actual_cost_usd or 0) }} USD{% if run.cost_is_estimated %} (estimado){% endif %}
  · búsquedas: {{ run.web_search_calls }} · llamadas: {{ run.model_calls }}</p>
 {% if run.status in ['completed','partial','failed','cancelled'] %}
 <p><a href="/api/v1/research-runs/{{ run.id }}/export?format=md">Exportar Markdown</a> ·

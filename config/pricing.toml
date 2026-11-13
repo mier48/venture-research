@@ -1,0 +1,26 @@
+# Tarifas versionadas para el cálculo de coste (sección 9.2 de la spec).
+pricing_version = "2026-11-13"
+effective_date = "2026-11-13"
+
+[web_search]
+# Dato del anexo B de la spec: 10 USD por cada 1.000 búsquedas web.
+usd_per_1000_calls = 10.0
+
+# Fallback conservador: se aplica cuando un modelo no aparece en [models].
+# El coste calculado con él se marca SIEMPRE como estimado (cost_estimated=true).
+[fallback]
+# Tarifa deliberadamente conservadora, no un precio de lista real.
+usd_per_million_input_tokens = 10.0
+usd_per_million_cached_input_tokens = 5.0
+usd_per_million_output_tokens = 30.0
+
+# Precios por modelo (USD por millón de tokens). NO inventar precios:
+# añade entradas únicamente con tarifas reales verificadas en la página de
+# precios del proveedor, indicando la fecha de verificación en un comentario.
+# Un modelo ausente hace que su coste se calcule con [fallback] y se marque
+# como estimado.
+#
+# [models."nombre-del-modelo"]
+# usd_per_million_input_tokens = ...
+# usd_per_million_cached_input_tokens = ...
+# usd_per_million_output_tokens = ...

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+{% if request.query_params.get('error') %}<p class="demo">No se pudo crear la ejecución.</p>{% endif %}
+<h2>Nueva investigación</h2>
+<form method="post" action="/ui/runs">
+  <label>Sector: <input name="sector" required maxlength="200" value="inmobiliario"></label>
+  <label><input type="checkbox" name="offline" value="1"> offline (datos ficticios)</label>
+  <button type="submit">Crear</button>
+</form>
+<h2>Ejecuciones</h2>
+<table>
+<tr><th>Sector</th><th>Estado</th><th>Progreso</th><th>Fecha</th><th></th></tr>
+{% for r in runs %}
+<tr>
+  <td>{{ r.sector }}</td>
+  <td class="status">{{ r.status }}{% if r.is_synthetic %} <em>(DEMO)</em>{% endif %}</td>
+  <td>{{ r.progress_percent }}%</td>
+  <td>{{ r.created_at }}</td>
+  <td><a href="/runs/{{ r.id }}">ver</a></td>
+</tr>
+{% else %}
+<tr><td colspan="5">Sin ejecuciones.</td></tr>
+{% endfor %}
+</table>
+{% endblock %}

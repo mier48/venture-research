@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}
+{% if run.is_synthetic %}<div class="demo">DEMO — datos ficticios</div>{% endif %}
+<div id="run-progress" hx-get="/runs/{{ run.id }}/progress" hx-trigger="every 3s" hx-swap="innerHTML">
+{% include "_run_progress.html" %}
+</div>
+{% endblock %}

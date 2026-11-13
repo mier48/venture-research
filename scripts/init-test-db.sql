@@ -1,0 +1,1 @@
+CREATE DATABASE bore_test;

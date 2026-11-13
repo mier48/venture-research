@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+{% if run and run.is_synthetic %}<div class="demo">DEMO — datos ficticios</div>{% endif %}
+<h2>{{ opp.name }}</h2>
+<p>Estado: <span class="status">{{ opp.status }}</span>
+{% if opp.final_score %} · Nota final: {{ opp.final_score }}{% endif %}
+{% if opp.confidence %} · Confianza: {{ opp.confidence }}{% endif %}</p>
+<p><strong>Segmento:</strong> {{ opp.customer_segment }} · <strong>Comprador:</strong> {{ opp.buyer }}</p>
+<p><strong>Problema:</strong> {{ opp.problem }}</p>
+<p><strong>Solución:</strong> {{ opp.solution }}</p>
+<p><strong>Modelo de negocio:</strong> {{ opp.business_model }}</p>
+<h3>Criterios</h3>
+<table><tr><th>Criterio</th><th>Inicial</th><th>Final</th><th>Confianza</th></tr>
+{% for code in ['demand','distribution','competition','monetization','technical','ai_defensibility','operational_legal'] %}
+<tr><td>{{ code }}</td><td>{{ scores_i[code].score if scores_i.get(code) else '—' }}</td>
+<td>{{ scores_f[code].score if scores_f.get(code) else '—' }}</td>
+<td>{{ (scores_f.get(code) or scores_i.get(code) or {}).confidence or '—' }}</td></tr>
+{% endfor %}
+</table>
+<h3>Competidores</h3>
+<ul>{% for c in competitors %}
+<li>{{ c.name }} ({{ c.category }}) — precio:
+{% if c.price_value is not none %}{{ c.price_value }} {{ c.price_currency }}/{{ c.price_unit }}{% else %}sin precio público{% endif %}
+· <em>{{ c.price_status }}</em></li>
+{% else %}<li>Sin competidores registrados.</li>{% endfor %}</ul>
+<h3>Afirmaciones</h3>
+<ul>{% for c in claims %}
+<li>[{{ c.kind }}/{{ c.verification_status }}{% if c.disputed %}, disputada{% endif %}] {{ c.text }}</li>
+{% endfor %}</ul>
+<h3>Fuentes</h3>
+<ul>{% for s in sources %}
+<li><a href="{{ s.url }}" rel="noopener noreferrer nofollow">{{ s.title or s.url }}</a> — {{ s.access_status }}</li>
+{% endfor %}</ul>
+{% endblock %}

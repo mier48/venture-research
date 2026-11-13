@@ -1,0 +1,95 @@
+services:
+  postgres:
+    image: postgres:18-alpine3.24
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bore}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bore}
+      POSTGRES_DB: ${POSTGRES_DB:-bore}
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./scripts/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-bore}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    # Sin puertos publicados al host (10.2).
+
+  redis:
+    image: redis:8.8.4-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    # Sin puertos publicados al host (10.2).
+
+  migrate:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://bore:bore@postgres:5432/bore}
+    command: ["alembic", "upgrade", "head"]
+
+  api:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://bore:bore@postgres:5432/bore}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      BORE_ALLOWED_HOSTS: ${BORE_ALLOWED_HOSTS:-127.0.0.1,localhost,api}
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/live').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    command: ["uvicorn", "bore.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  worker:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://bore:bore@postgres:5432/bore}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    command: ["bore", "worker"]
+
+  tests:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: test
+    profiles: ["test"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      BORE_TEST_DATABASE_URL: postgresql+psycopg://bore:bore@postgres:5432/bore_test
+      BORE_TEST_REDIS_URL: redis://redis:6379/1
+      DATABASE_URL: postgresql+psycopg://bore:bore@postgres:5432/bore
+      REDIS_URL: redis://redis:6379/0
+    command: ["pytest", "-q", "-m", "not integration_external and not e2e"]
+
+volumes:
+  pgdata:

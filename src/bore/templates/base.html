@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>{% block title %}Venture Research{% endblock %}</title>
+<script src="/static/htmx.min.js" defer></script>
+<style>
+body{font-family:system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#1a1a1a}
+table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:.4rem;text-align:left}
+.demo{background:#fff3cd;border:1px solid #e0c56e;padding:.5rem;margin:.5rem 0}
+.status{font-weight:600}
+</style>
+</head>
+<body>
+<h1><a href="/" style="text-decoration:none;color:inherit">Venture Research</a></h1>
+{% block content %}{% endblock %}
+</body>
+</html>

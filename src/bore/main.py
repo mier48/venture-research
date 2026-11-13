@@ -122,6 +122,8 @@ async def ui_create_run(
         "country": country,
         "language": language,
         "requested_ideas": requested_ideas,
+        "review_limit": max(6, requested_ideas),
+        "deep_dive_limit": max(8, requested_ideas),
         "min_final_score": min_final_score,
         "limits": {
             "max_usd": max_usd,
@@ -136,7 +138,14 @@ async def ui_create_run(
     if resp.status_code == 202:
         run_id = resp.json()["id"]
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
-    return RedirectResponse("/?error=1", status_code=303)
+    from urllib.parse import quote
+
+    try:
+        problem = resp.json()
+        msg = problem.get("detail") or problem.get("title") or "Error desconocido"
+    except Exception:
+        msg = "Error desconocido"
+    return RedirectResponse(f"/?error=1&msg={quote(msg)}", status_code=303)
 
 
 @app.post("/ui/runs/{run_id}/cancel")

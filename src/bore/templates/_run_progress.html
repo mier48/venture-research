@@ -1,4 +1,7 @@
 {% from "_macros.html" import badge, confidence, score, progress, stage_name, stop_reason, rejection, status_explain %}
+{% if run.status in ['queued','running'] %}
+<div hx-get="/runs/{{ run.id }}/progress" hx-trigger="every 3s" hx-swap="outerHTML">
+{% endif %}
 <div class="run-header">
   <h2>{{ run.sector }}</h2>
   {{ badge(run.status) }}
@@ -124,4 +127,7 @@
   </div>
 </details>
 {% endfor %}
+{% endif %}
+{% if run.status in ['queued','running'] %}
+</div>
 {% endif %}

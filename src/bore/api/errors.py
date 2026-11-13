@@ -43,4 +43,11 @@ async def http_error_handler(request: Request, exc: Exception) -> JSONResponse:
 
 
 def validation_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    return problem(422, "validation_error", "La solicitud no supera la validación")
+    detail = None
+    errors = getattr(exc, "errors", None)
+    if callable(errors):
+        first = errors()[0] if errors() else None
+        if first:
+            loc = ".".join(str(p) for p in first.get("loc", []) if p != "body")
+            detail = f"{loc}: {first.get('msg')}" if loc else str(first.get("msg"))
+    return problem(422, "validation_error", "La solicitud no supera la validación", detail)

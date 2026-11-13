@@ -4,8 +4,7 @@
 {% if run.is_synthetic %}<div class="demo-banner">DEMO — datos ficticios</div>{% endif %}
 {% endblock %}
 {% block content %}
-<div id="run-progress" hx-get="/runs/{{ run.id }}/progress" hx-trigger="every 3s"
-     hx-swap="innerHTML" aria-live="polite">
+<div id="run-progress" aria-live="polite">
 {% include "_run_progress.html" %}
 </div>
 {% endblock %}

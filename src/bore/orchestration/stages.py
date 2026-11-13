@@ -309,6 +309,10 @@ class PipelineContext:
             duration_ms=usage.duration_ms,
             outcome=outcome,
         )
+        # Totales de la ejecución al día tras cada llamada: la UI los sondea
+        # en tiempo real y el corte por presupuesto no debe perder el gasto.
+        await repo.recompute_run_costs(self.session, self.run_id)
+        await self.session.commit()
         self.budget.record(usage, cost)
 
 

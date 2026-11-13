@@ -2,7 +2,7 @@
 {% from "_macros.html" import badge, progress %}
 {% block content %}
 {% if request.query_params.get('error') %}
-<div class="alert alert-danger">No se pudo crear la ejecución.</div>
+<div class="alert alert-danger">No se pudo crear la ejecución.{{ ' ' + request.query_params.get('msg', '') }}</div>
 {% endif %}
 
 <section class="hero">
@@ -27,7 +27,7 @@
       </div>
       <div class="field">
         <label for="f-country">País</label>
-        <input id="f-country" name="country" maxlength="8" value="ES">
+        <input id="f-country" name="country" minlength="2" maxlength="2" value="ES">
         <p class="help">Código de país de la investigación.</p>
       </div>
       <div class="field">
@@ -37,7 +37,7 @@
       </div>
       <div class="field">
         <label for="f-ideas">Nº máx. de ideas</label>
-        <input id="f-ideas" type="number" name="requested_ideas" min="1" max="20" value="5">
+        <input id="f-ideas" type="number" name="requested_ideas" min="1" max="10" value="5">
         <p class="help">Ideas publicadas como máximo.</p>
       </div>
       <div class="field">
@@ -57,15 +57,15 @@
         </div>
         <div class="field">
           <label for="f-web">Búsquedas web máx.</label>
-          <input id="f-web" type="number" name="max_web_search_calls" min="0" value="180">
+          <input id="f-web" type="number" name="max_web_search_calls" min="1" max="1000" value="180">
         </div>
         <div class="field">
           <label for="f-calls">Llamadas al modelo máx.</label>
-          <input id="f-calls" type="number" name="max_model_calls" min="0" value="200">
+          <input id="f-calls" type="number" name="max_model_calls" min="1" max="2000" value="200">
         </div>
         <div class="field">
           <label for="f-dur">Duración máx. (s)</label>
-          <input id="f-dur" type="number" name="max_duration_seconds" min="60" value="5400">
+          <input id="f-dur" type="number" name="max_duration_seconds" min="60" max="14400" value="5400">
         </div>
       </div>
     </details>

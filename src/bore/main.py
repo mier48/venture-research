@@ -15,32 +15,37 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from bore.api import routes_opportunities, routes_runs
+from bore.api import routes_metrics, routes_opportunities, routes_runs
 from bore.api.errors import (
     ApiError,
     api_error_handler,
     http_error_handler,
     validation_error_handler,
 )
+from bore.api.security import SecurityMiddleware
 from bore.config import Settings, get_settings
 from bore.db import repositories as repo
 from bore.db.session import init_engine, new_session
+from bore.observability import setup_logging
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> Any:
     settings = get_settings()
+    setup_logging()
     init_engine(settings.database_url)
     yield
 
 
 app = FastAPI(title="Venture Research — BORE", lifespan=lifespan)
+app.add_middleware(SecurityMiddleware, settings=get_settings())
 app.add_exception_handler(ApiError, api_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(RequestValidationError, validation_error_handler)
 app.add_exception_handler(Exception, http_error_handler)
 
 app.include_router(routes_runs.router, prefix="/api/v1", tags=["research-runs"])
 app.include_router(routes_opportunities.router, prefix="/api/v1", tags=["opportunities"])
+app.include_router(routes_metrics.router, prefix="/api/v1", tags=["metrics"])
 
 _static = resources.files("bore").joinpath("static")
 app.mount("/static", StaticFiles(directory=str(_static)), name="static")
@@ -70,58 +75,155 @@ async def health_ready(settings: Settings = Depends(get_settings)) -> Any:  # no
 # ------------------------------ Interfaz mínima -------------------------------
 
 
+def _csrf() -> str:
+    from bore.api.security import csrf_token
+
+    return csrf_token(get_settings())
+
+
+def _check_csrf(settings: Settings, token: str | None) -> None:
+    from bore.api.security import csrf_valid
+
+    if not csrf_valid(settings, token):
+        raise ApiError(403, "forbidden_csrf", "Token CSRF inválido")
+
+
 @app.get("/", response_class=HTMLResponse)
 async def ui_index(request: Request) -> HTMLResponse:
     async with new_session() as s:
         runs = await repo.list_runs(s, status=None, limit=50, offset=0)
     return _templates.TemplateResponse(
-        request, "index.html", {"runs": runs, "settings": get_settings()}
+        request,
+        "index.html",
+        {"runs": runs, "settings": get_settings(), "csrf": _csrf()},
     )
 
 
 @app.post("/ui/runs")
 async def ui_create_run(
     sector: str = Form(...),
+    country: str = Form(default="ES"),
+    language: str = Form(default="es-ES"),
+    requested_ideas: int = Form(default=5),
+    min_final_score: float = Form(default=7.0),
+    max_usd: float = Form(default=10.0),
+    max_web_search_calls: int = Form(default=180),
+    max_model_calls: int = Form(default=200),
+    max_duration_seconds: int = Form(default=5400),
     offline: str | None = Form(default=None),
+    csrf: str | None = Form(default=None),
 ) -> RedirectResponse:
     import httpx
 
     settings = get_settings()
+    _check_csrf(settings, csrf)
+    payload = {
+        "sector": sector,
+        "country": country,
+        "language": language,
+        "requested_ideas": requested_ideas,
+        "min_final_score": min_final_score,
+        "limits": {
+            "max_usd": max_usd,
+            "max_web_search_calls": max_web_search_calls,
+            "max_model_calls": max_model_calls,
+            "max_duration_seconds": max_duration_seconds,
+        },
+        "offline": bool(offline),
+    }
     async with httpx.AsyncClient(base_url=settings.bore_api_url, timeout=30) as client:
-        resp = await client.post(
-            "/api/v1/research-runs",
-            json={"sector": sector, "offline": bool(offline)},
-        )
+        resp = await client.post("/api/v1/research-runs", json=payload)
     if resp.status_code == 202:
         run_id = resp.json()["id"]
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
     return RedirectResponse("/?error=1", status_code=303)
 
 
-@app.get("/runs/{run_id}", response_class=HTMLResponse)
-async def ui_run_detail(request: Request, run_id: uuid.UUID) -> HTMLResponse:
+@app.post("/ui/runs/{run_id}/cancel")
+async def ui_cancel_run(
+    run_id: uuid.UUID, csrf: str | None = Form(default=None)
+) -> RedirectResponse:
+    settings = get_settings()
+    _check_csrf(settings, csrf)
+    async with new_session() as s:
+        run = await repo.get_run(s, run_id)
+        if run is None:
+            raise ApiError(404, "not_found", "Ejecución no encontrada")
+        if run["status"] in ("queued", "running"):
+            await repo.request_cancel(s, run_id)
+            await s.commit()
+    return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+
+_TERMINAL = {"completed", "partial", "failed", "cancelled"}
+
+
+@app.post("/ui/runs/{run_id}/delete")
+async def ui_delete_run(
+    run_id: uuid.UUID, csrf: str | None = Form(default=None)
+) -> RedirectResponse:
+    settings = get_settings()
+    _check_csrf(settings, csrf)
+    async with new_session() as s:
+        run = await repo.get_run(s, run_id)
+        if run is None:
+            raise ApiError(404, "not_found", "Ejecución no encontrada")
+        if run["status"] in _TERMINAL:
+            await repo.delete_run(s, run_id)
+            await s.commit()
+            return RedirectResponse("/", status_code=303)
+    return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+
+async def _run_page_ctx(run_id: uuid.UUID) -> dict[str, Any]:
+    from bore.db.tables import stage_runs
+
     async with new_session() as s:
         run = await repo.get_run(s, run_id)
         if run is None:
             raise ApiError(404, "not_found", "Ejecución no encontrada")
         opps = await repo.list_opportunities(s, run_id)
         stats = await repo.opportunity_status_counts(s, run_id)
-    return _templates.TemplateResponse(
-        request, "run.html", {"run": run, "opps": opps, "stats": stats}
-    )
+        stages_rows = (
+            await s.execute(
+                sa.select(stage_runs)
+                .where(stage_runs.c.research_run_id == run_id)
+                .order_by(stage_runs.c.id)
+            )
+        ).all()
+        stages_done = {r.stage for r in stages_rows if r.status == "completed"}
+    return {
+        "run": run,
+        "opps": opps,
+        "stats": stats,
+        "stages_done": stages_done,
+        "all_stages": [
+            ("sector_mapping", "Mapa del sector"),
+            ("demand_research", "Investigación de demanda"),
+            ("candidate_generation", "Generación de candidatas"),
+            ("eligibility_filter", "Elegibilidad"),
+            ("shallow_screening", "Sondeo superficial"),
+            ("market_validation", "Validación de mercado"),
+            ("evidence_audit", "Auditoría de evidencia"),
+            ("scoring", "Puntuación"),
+            ("adversarial_review", "Revisión adversaria"),
+            ("ranking_and_report", "Ranking e informe"),
+        ],
+    }
+
+
+@app.get("/runs/{run_id}", response_class=HTMLResponse)
+async def ui_run_detail(request: Request, run_id: uuid.UUID) -> HTMLResponse:
+    ctx = await _run_page_ctx(run_id)
+    ctx["csrf"] = _csrf()
+    return _templates.TemplateResponse(request, "run.html", ctx)
 
 
 @app.get("/runs/{run_id}/progress", response_class=HTMLResponse)
 async def ui_run_progress(request: Request, run_id: uuid.UUID) -> HTMLResponse:
-    async with new_session() as s:
-        run = await repo.get_run(s, run_id)
-        if run is None:
-            raise ApiError(404, "not_found", "Ejecución no encontrada")
-        opps = await repo.list_opportunities(s, run_id)
-        stats = await repo.opportunity_status_counts(s, run_id)
-    return _templates.TemplateResponse(
-        request, "_run_progress.html", {"run": run, "opps": opps, "stats": stats}
-    )
+    ctx = await _run_page_ctx(run_id)
+    ctx["csrf"] = _csrf()
+    return _templates.TemplateResponse(request, "_run_progress.html", ctx)
 
 
 @app.get("/opportunities/{opp_id}", response_class=HTMLResponse)

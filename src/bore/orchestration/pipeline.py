@@ -238,6 +238,9 @@ async def run_pipeline(
         stop_heartbeat.set()
         heartbeat_task.cancel()
         ctx.stage = None
+        # Si una sentencia falló a media etapa, la transacción queda abortada:
+        # rollback previo para poder registrar el estado final de la ejecución.
+        await session.rollback()
         await repo.recompute_run_costs(session, run_id)
         extra: dict[str, Any] = {}
         trace_id = getattr(research, "last_trace_id", None)

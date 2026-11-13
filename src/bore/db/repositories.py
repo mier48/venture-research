@@ -87,8 +87,19 @@ async def last_run_created_at(s: AsyncSession) -> datetime | None:
 async def daily_cost_usd(s: AsyncSession, day: date | None = None) -> Decimal:
     day = day or datetime.now(UTC).date()
     start = datetime(day.year, day.month, day.day, tzinfo=UTC)
-    q = sa.select(sa.func.coalesce(sa.func.sum(t.provider_calls.c.cost_usd), 0)).where(
-        t.provider_calls.c.created_at >= start
+    q = (
+        sa.select(sa.func.coalesce(sa.func.sum(t.provider_calls.c.cost_usd), 0))
+        .join(
+            t.research_runs,
+            t.provider_calls.c.research_run_id == t.research_runs.c.id,
+        )
+        .where(
+            t.provider_calls.c.created_at >= start,
+            # Las ejecuciones sintéticas no gastan dinero real: su usage se
+            # registra para métricas/presupuesto por ejecución pero no
+            # consume el límite diario (D35).
+            t.research_runs.c.is_synthetic.is_(False),
+        )
     )
     return Decimal((await s.execute(q)).scalar_one())
 

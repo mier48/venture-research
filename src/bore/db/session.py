@@ -17,7 +17,14 @@ _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
 def init_engine(database_url: str) -> AsyncEngine:
     global _engine, _sessionmaker
-    _engine = create_async_engine(database_url, pool_pre_ping=True)
+    _engine = create_async_engine(
+        database_url,
+        pool_pre_ping=True,
+        # psycopg3 prepara sentencias por conexión; una intercalación entre
+        # tareas async que comparten conexión provoca "prepared statement
+        # _pg3_N already exists" y deja la transacción abortada. Desactivado.
+        connect_args={"prepare_threshold": None},
+    )
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
     return _engine
 

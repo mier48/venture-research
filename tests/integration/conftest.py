@@ -23,7 +23,7 @@ if sys.platform == "win32":
 async def db() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     if not DATABASE_URL:
         pytest.skip("requires_services: falta BORE_TEST_DATABASE_URL")
-    engine = create_async_engine(DATABASE_URL)
+    engine = create_async_engine(DATABASE_URL, connect_args={"prepare_threshold": None})
     async with engine.begin() as conn:
         await conn.run_sync(metadata.drop_all)
         await conn.run_sync(metadata.create_all)

@@ -253,15 +253,16 @@ async def export_run(
     session: AsyncSession = Depends(_session),  # noqa: B008
 ) -> Response:
     run = await _get_or_404(session, run_id)
+    headers = {"content-disposition": f'attachment; filename="bore-{run_id}.{format}"'}
     if format == "json":
         from bore.reporting.json_export import export_json
 
         content = await export_json(session, run)
-        return Response(content=content, media_type="application/json")
+        return Response(content=content, media_type="application/json", headers=headers)
     from bore.reporting.markdown import export_markdown
 
     content = await export_markdown(session, run)
-    return Response(content=content, media_type="text/markdown; charset=utf-8")
+    return Response(content=content, media_type="text/markdown; charset=utf-8", headers=headers)
 
 
 @router.delete("/research-runs/{run_id}", status_code=204)

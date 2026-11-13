@@ -67,3 +67,33 @@ Tests externos de humo (consumen llamadas de pago, desactivados por defecto):
       uv run pytest -m integration_external
 
 `HttpSourceVerifier` implementa anti-SSRF (DNS + IP prohibida por salto, máx. 5 redirects, tope de tamaño, robots, ≤1 req/s/host). Riesgo residual documentado en DECISIONS D18 (TOCTOU de DNS rebinding).
+
+## Fase 4
+
+### Seguridad web (10.3/10.4)
+
+`SecurityMiddleware` valida Host (`BORE_ALLOWED_HOSTS`), Origin en métodos que
+cambian estado (`BORE_ALLOWED_ORIGINS`) y exige `Content-Type: application/json`
+en POST `/api/*` con cuerpo (415 problem+json). Los formularios de la UI llevan
+`csrf` oculto firmado con `BORE_SECRET_KEY` (vacío → clave aleatoria por proceso
++ warning). Añade `test` a los hosts en suites ASGITransport.
+
+### Observabilidad (9.3)
+
+`observability.setup_logging()` emite logs JSON por línea (run_id, stage,
+event, duration_ms, provider, model, usage, retry_count; sin secretos).
+`GET /api/v1/metrics` agrega métricas desde BD (decisión D29).
+
+### Exportaciones 8.4
+
+`reporting/markdown.py` y `json_export.py`: orden exacto, etiquetas en
+español, escape de Markdown malicioso, descargas con Content-Disposition.
+
+### E2E (Playwright)
+
+```bash
+uv run playwright install chromium
+BORE_E2E_BASE_URL=http://127.0.0.1:8000 uv run pytest -m e2e
+```
+
+Requiere el stack en marcha; respeta una ejecución activa e intervalo entre POST.

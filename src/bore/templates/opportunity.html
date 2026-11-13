@@ -3,32 +3,73 @@
 {% if run and run.is_synthetic %}<div class="demo">DEMO — datos ficticios</div>{% endif %}
 <h2>{{ opp.name }}</h2>
 <p>Estado: <span class="status">{{ opp.status }}</span>
-{% if opp.final_score %} · Nota final: {{ opp.final_score }}{% endif %}
-{% if opp.confidence %} · Confianza: {{ opp.confidence }}{% endif %}</p>
+{% if opp.final_score %} · Nota final: <strong>{{ opp.final_score }}</strong>{% endif %}
+{% if opp.confidence %} · Confianza: {{ opp.confidence }}{% endif %}
+{% if opp.rejection_code %} · Motivo: {{ opp.rejection_code }}{% endif %}</p>
+<p><a href="/runs/{{ run.id }}">← Volver a la ejecución</a></p>
+
 <p><strong>Segmento:</strong> {{ opp.customer_segment }} · <strong>Comprador:</strong> {{ opp.buyer }}</p>
 <p><strong>Problema:</strong> {{ opp.problem }}</p>
 <p><strong>Solución:</strong> {{ opp.solution }}</p>
+<p><strong>Propuesta de valor:</strong> {{ opp.value_proposition }}</p>
 <p><strong>Modelo de negocio:</strong> {{ opp.business_model }}</p>
+<p><strong>MVP:</strong> {{ opp.mvp_scope }}</p>
+<p><strong>Excluidas:</strong> {{ opp.excluded_features }}</p>
+{% if opp.acquisition %}<p><strong>Adquisición:</strong> {{ (opp.acquisition.channels or [])|join(', ') }}{% if opp.acquisition.notes %} — {{ opp.acquisition.notes|join('; ') }}{% endif %}</p>{% endif %}
+{% if opp.assumptions %}<p><strong>Supuestos:</strong> {{ (opp.assumptions['items'] if opp.assumptions is mapping else opp.assumptions)|join('; ') }}</p>{% endif %}
+{% if opp.unit_economics %}
+<h3>Economía unitaria (hipótesis)</h3>
+<ul>
+  <li>Precio: {{ opp.unit_economics.price_eur_month }} €/mes</li>
+  <li>Coste variable: {{ opp.unit_economics.variable_cost_eur_month }} €/mes · fijos: {{ opp.unit_economics.fixed_cost_eur_month }} €/mes</li>
+  <li>Clientes de pago necesarios: {{ opp.unit_economics.required_paying_customers or 'n/d' }}</li>
+  {% if opp.unit_economics.penetration_pct %}<li>Penetración sobre universo verificado: {{ opp.unit_economics.penetration_pct }}%</li>{% endif %}
+</ul>
+{% endif %}
+{% if opp.risks %}
+<h3>Riesgos y barreras</h3>
+<ul>
+{% for note in opp.risks.technical_notes or [] %}<li>Técnica: {{ note }}</li>{% endfor %}
+{% for note in opp.risks.data_barriers or [] %}<li>Datos: {{ note }}</li>{% endfor %}
+{% for note in opp.risks.legal_operational_risks or [] %}<li>Legal-operativa: {{ note }}</li>{% endfor %}
+{% if opp.risks.llm_substitution_risk %}<li>Sustitución por LLM: {{ opp.risks.llm_substitution_risk }}</li>{% endif %}
+{% if opp.risks.estimates %}<li>Estimaciones — alcance: {{ opp.risks.estimates.technical_scope }}; mantenimiento: {{ opp.risks.estimates.maintenance_cost }}; semanas MVP: {{ opp.risks.estimates.mvp_weeks }}</li>{% endif %}
+</ul>
+{% endif %}
+
 <h3>Criterios</h3>
-<table><tr><th>Criterio</th><th>Inicial</th><th>Final</th><th>Confianza</th></tr>
+<table><tr><th>Criterio</th><th>Inicial</th><th>Final</th><th>Δ</th><th>Confianza</th><th>Justificación</th></tr>
 {% for code in ['demand','distribution','competition','monetization','technical','ai_defensibility','operational_legal'] %}
-<tr><td>{{ code }}</td><td>{{ scores_i[code].score if scores_i.get(code) else '—' }}</td>
-<td>{{ scores_f[code].score if scores_f.get(code) else '—' }}</td>
-<td>{{ (scores_f.get(code) or scores_i.get(code) or {}).confidence or '—' }}</td></tr>
+{% set si = scores_i.get(code) %}{% set sf = scores_f.get(code) %}
+<tr><td>{{ code }}</td>
+<td>{{ si.score if si and si.score is not none else '—' }}</td>
+<td>{{ sf.score if sf and sf.score is not none else '—' }}</td>
+<td>{% if si and sf and si.score is not none and sf.score is not none %}{{ sf.score - si.score }}{% else %}—{% endif %}</td>
+<td>{{ (sf or si or {}).confidence or '—' }}</td>
+<td>{{ (sf or si or {}).rationale or '—' }}</td></tr>
 {% endfor %}
 </table>
+
 <h3>Competidores</h3>
-<ul>{% for c in competitors %}
-<li>{{ c.name }} ({{ c.category }}) — precio:
-{% if c.price_value is not none %}{{ c.price_value }} {{ c.price_currency }}/{{ c.price_unit }}{% else %}sin precio público{% endif %}
-· <em>{{ c.price_status }}</em></li>
-{% else %}<li>Sin competidores registrados.</li>{% endfor %}</ul>
+<table><tr><th>Nombre</th><th>Categoría</th><th>Posicionamiento</th><th>Precio</th><th>Estado</th><th>Web</th></tr>
+{% for c in competitors %}
+<tr>
+<td>{{ c.name }}</td><td>{{ c.category }}</td><td>{{ c.positioning }}</td>
+<td>{% if c.price_value is not none %}{{ c.price_value }} {{ c.price_currency }}/{{ c.price_unit }}{% else %}no verificado{% endif %}</td>
+<td>{{ c.price_status }}</td>
+<td>{% if c.website_url and c.website_url.startswith('http') %}<a href="{{ c.website_url }}" rel="noopener noreferrer nofollow">enlace</a>{% else %}—{% endif %}</td>
+</tr>
+{% else %}<tr><td colspan="6">Sin competidores registrados.</td></tr>{% endfor %}
+</table>
+
 <h3>Afirmaciones</h3>
 <ul>{% for c in claims %}
-<li>[{{ c.kind }}/{{ c.verification_status }}{% if c.disputed %}, disputada{% endif %}] {{ c.text }}</li>
+<li><em>[{{ c.kind }} · {{ c.verification_status }}{% if c.disputed %}, disputada{% endif %}]</em> {{ c.text }}</li>
 {% endfor %}</ul>
+
 <h3>Fuentes</h3>
-<ul>{% for s in sources %}
-<li><a href="{{ s.url }}" rel="noopener noreferrer nofollow">{{ s.title or s.url }}</a> — {{ s.access_status }}</li>
-{% endfor %}</ul>
+<ol>{% for s in sources %}
+<li>{% if s.url.startswith('http://') or s.url.startswith('https://') %}<a href="{{ s.url }}" rel="noopener noreferrer nofollow">{{ s.title or s.url }}</a>{% else %}{{ s.url }}{% endif %}
+ — {{ s.access_status }}</li>
+{% endfor %}</ol>
 {% endblock %}

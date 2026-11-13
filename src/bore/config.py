@@ -35,7 +35,9 @@ class Settings(BaseSettings):
     verifier_per_host_min_interval: float = 1.0
 
     bore_api_url: str = "http://127.0.0.1:8000"
-    bore_allowed_hosts: str = "127.0.0.1,localhost,api,testserver"
+    # Firma del token CSRF de la UI; vacío -> clave aleatoria por proceso.
+    bore_secret_key: str = ""
+    bore_allowed_hosts: str = "127.0.0.1,localhost,api,testserver,test"
     bore_allowed_origins: str = "http://127.0.0.1:8000,http://localhost:8000"
 
     database_url: str = "postgresql+psycopg://bore:bore@postgres:5432/bore"

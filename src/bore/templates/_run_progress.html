@@ -1,28 +1,64 @@
-<h2>{{ run.sector }} — <span class="status">{{ run.status }}</span></h2>
-<p>Etapa: {{ run.current_stage or '—' }} · Progreso: {{ run.progress_percent }}%
-{% if run.stop_reason %} · Parada: {{ run.stop_reason }}{% endif %}
-{% if run.error_code %} · Error: {{ run.error_code }}{% endif %}</p>
+<h2>{{ run.sector }} — <span class="status">{{ run.status }}</span>
+{% if run.is_synthetic %}<em class="demo-inline">DEMO</em>{% endif %}</h2>
+<p>Etapa actual: <strong>{{ run.current_stage or '—' }}</strong> · Progreso: {{ run.progress_percent }}%</p>
+{% if run.stop_reason %}<p>Parada: <strong>{{ run.stop_reason }}</strong>{% if run.error_code %} · Error: {{ run.error_code }}{% endif %}</p>{% endif %}
+{% if run.error_message_safe %}<p class="warn">{{ run.error_message_safe }}</p>{% endif %}
+
+<h3>Etapas</h3>
+<ol class="stages">
+{% for key, label in all_stages %}
+  <li class="{% if key in stages_done %}done{% elif run.current_stage == key %}current{% endif %}">{{ label }}</li>
+{% endfor %}
+</ol>
+
 <p>Coste: {{ '%.4f'|format(run.actual_cost_usd or 0) }} USD{% if run.cost_is_estimated %} (estimado){% endif %}
- · búsquedas: {{ run.web_search_calls }} · llamadas: {{ run.model_calls }}</p>
-{% if run.status in ['completed','partial','failed','cancelled'] %}
-<p><a href="/api/v1/research-runs/{{ run.id }}/export?format=md">Exportar Markdown</a> ·
-<a href="/api/v1/research-runs/{{ run.id }}/export?format=json">Exportar JSON</a></p>
+ · llamadas al modelo: {{ run.model_calls }} · búsquedas web: {{ run.web_search_calls }}</p>
+{% set limits = run.config.get('limits', {}) %}
+<details><summary>Límites de la ejecución</summary>
+<ul>
+  <li>USD máx.: {{ limits.get('max_usd') }}</li>
+  <li>Búsquedas web máx.: {{ limits.get('max_web_search_calls') }}</li>
+  <li>Llamadas al modelo máx.: {{ limits.get('max_model_calls') }}</li>
+  <li>Duración máx.: {{ limits.get('max_duration_seconds') }} s</li>
+</ul>
+</details>
+
+{% if run.status in ['queued','running'] %}
+<form method="post" action="/ui/runs/{{ run.id }}/cancel" class="inline">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit">Cancelar ejecución</button>
+</form>
+{% elif run.status in ['completed','partial','failed','cancelled'] %}
+<p>
+<a href="/api/v1/research-runs/{{ run.id }}/export?format=md">Descargar informe (Markdown)</a> ·
+<a href="/api/v1/research-runs/{{ run.id }}/export?format=json">Descargar JSON</a>
+</p>
+<form method="post" action="/ui/runs/{{ run.id }}/delete" class="inline">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit">Borrar ejecución</button>
+</form>
 {% endif %}
+
 <h3>Recuentos por estado</h3>
 <ul>{% for k,v in stats|dictsort %}<li>{{ k }}: {{ v }}</li>{% endfor %}</ul>
+
 <h3>Ranking</h3>
 <table>
-<tr><th>#</th><th>Nombre</th><th>Nota</th><th>Confianza</th><th></th></tr>
+<tr><th>#</th><th>Nombre</th><th>Nota final</th><th>Confianza</th><th></th></tr>
 {% for o in opps if o.status == 'published' %}
 <tr><td>{{ o.rank }}</td><td>{{ o.name }}</td><td>{{ o.final_score }}</td><td>{{ o.confidence }}</td>
 <td><a href="/opportunities/{{ o.id }}">ficha</a></td></tr>
 {% else %}<tr><td colspan="5">Sin resultados publicados.</td></tr>{% endfor %}
 </table>
-<h3>Otras candidatas</h3>
+
+<h3>Resto de candidatas</h3>
+{% for status, group in opps|selectattr('status','ne','published')|groupby('status') %}
+<h4>{{ status }} ({{ group|length }})</h4>
 <table>
-<tr><th>Nombre</th><th>Estado</th><th>Motivo</th><th></th></tr>
-{% for o in opps if o.status != 'published' %}
-<tr><td>{{ o.name }}</td><td>{{ o.status }}</td><td>{{ o.rejection_code or '—' }}</td>
+<tr><th>Nombre</th><th>Motivo</th><th></th></tr>
+{% for o in group %}
+<tr><td>{{ o.name }}</td><td>{{ o.rejection_code or '—' }}</td>
 <td><a href="/opportunities/{{ o.id }}">ficha</a></td></tr>
 {% endfor %}
 </table>
+{% endfor %}

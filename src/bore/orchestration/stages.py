@@ -205,6 +205,7 @@ class PipelineContext:
                     "country": self.config["country"],
                     "language": self.config["language"],
                 },
+                phase="research",
             ),
             input_text=input_text,
             country=self.config["country"],
@@ -246,6 +247,7 @@ class PipelineContext:
                     "country": self.config["country"],
                     "language": self.config["language"],
                 },
+                phase="structure",
             ),
             input_text=input_text,
             output_type=_output_type_for(role),
@@ -718,14 +720,31 @@ async def stage_eligibility(ctx: PipelineContext) -> dict[str, Any]:
                 f"[idea_index={idx}] Candidata: {_candidate_summary(opp_row)}",
                 opp=opp_id,
             )
-            assessments = [
-                eligibility.RuleAssessment(
-                    rule=RejectionCode(a.rule),
-                    answer=EligibilityAnswer(a.answer),
-                    reason=a.reason,
+            assessments, missing = eligibility.consolidate(
+                [
+                    eligibility.RuleAssessment(
+                        rule=RejectionCode(a.rule),
+                        answer=EligibilityAnswer(a.answer),
+                        reason=a.reason,
+                    )
+                    for a in out.assessments
+                ]
+            )
+            if missing:
+                await repo.insert_event(
+                    task_session,
+                    ctx.run_id,
+                    level="warning",
+                    event_type="eligibility_rule_missing",
+                    stage=StageId.ELIGIBILITY_FILTER.value,
+                    message_safe=(
+                        "El evaluador omitió reglas: " + ", ".join(r.value for r in missing)
+                    ),
+                    payload={
+                        "opportunity_id": str(opp_id),
+                        "missing_rules": [r.value for r in missing],
+                    },
                 )
-                for a in out.assessments
-            ]
             decision = eligibility.decide(assessments)
             current = OpportunityStatus.CANDIDATE
             check_transition(current, decision.status)
@@ -736,8 +755,8 @@ async def stage_eligibility(ctx: PipelineContext) -> dict[str, Any]:
                 rejection_code=decision.rejection_code.value if decision.rejection_code else None,
                 eligibility={
                     "assessments": [
-                        {"rule": a.rule, "answer": a.answer, "reason": a.reason}
-                        for a in out.assessments
+                        {"rule": a.rule.value, "answer": a.answer.value, "reason": a.reason}
+                        for a in assessments
                     ],
                     "uncertainties": [u.value for u in decision.uncertainties],
                     "reason": decision.reason,

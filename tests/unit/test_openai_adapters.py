@@ -283,7 +283,7 @@ _EXAMPLE_JSON: dict[str, str] = {
     "eligibility_assessor": json.dumps(
         {
             "candidate_index": 0,
-            "assessments": [{"rule": "Es software B2B", "answer": "yes", "reason": "SaaS"}],
+            "assessments": [{"rule": "not_software", "answer": "yes", "reason": "SaaS"}],
         }
     ),
     "screener": json.dumps(
@@ -399,3 +399,30 @@ async def test_analysis_requires_output_type():
     )
     with pytest.raises(ContractViolationError):
         await provider.analyze(task)
+
+
+async def test_research_adapter_passes_task_instructions_verbatim():
+    """El adaptador real recibe task.instructions (fase research), que difiere
+    de las instrucciones de la fase de estructuración del mismo papel."""
+    from bore.agents.prompt_registry import render_prompt
+
+    ctx = {"sector": "inmobiliario", "country": "DE", "language": "es-ES"}
+    research_instr = render_prompt("sector_mapper", ctx, phase="research")
+    structure_instr = render_prompt("sector_mapper", ctx, phase="structure")
+    assert research_instr != structure_instr
+
+    model = ScriptedModel(steps=[ModelStep(output=[message_with_citation()])])
+    provider = OpenAIResearchProvider(settings_with(model))
+    result = await provider.research(
+        ResearchTask(
+            role="sector_mapper",
+            stage="sector_mapping",
+            instructions=research_instr,
+            input_text="Sector: inmobiliario. Mercado: DE.",
+            country="DE",
+            language="es-ES",
+        )
+    )
+    assert result.usage.requests >= 0
+    assert model.first_call is not None
+    assert model.first_call.system_instructions == research_instr

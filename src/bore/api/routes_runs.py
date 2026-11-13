@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bore.agents.prompt_registry import prompt_version
+from bore.agents.prompt_registry import composite_prompt_version, prompt_versions
 from bore.api.errors import ApiError
 from bore.api.schemas import (
     OpportunitySummary,
@@ -89,8 +89,9 @@ async def create_run(
             "research": settings.bore_model_research or None,
             "analysis": settings.bore_model_analysis or None,
             "review": settings.bore_model_review or None,
+            "prompt_versions": prompt_versions(),
         },
-        prompt_version=prompt_version("sector_mapper"),
+        prompt_version=composite_prompt_version(),
         rubric_version=RUBRIC_VERSION,
         pricing_version=pricing.pricing_version,
     )

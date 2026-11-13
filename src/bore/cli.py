@@ -98,7 +98,7 @@ def demo(offline: bool = typer.Option(True, "--offline")) -> None:
 
 
 async def _demo() -> None:
-    from bore.agents.prompt_registry import prompt_version
+    from bore.agents.prompt_registry import composite_prompt_version, prompt_versions
     from bore.db import repositories as repo
     from bore.db.session import init_engine, new_session
     from bore.domain.scoring import RUBRIC_VERSION
@@ -141,8 +141,13 @@ async def _demo() -> None:
             language=config["language"],
             config=config,
             is_synthetic=True,
-            model_config={"research": None, "analysis": None, "review": None},
-            prompt_version=prompt_version("sector_mapper"),
+            model_config={
+                "research": None,
+                "analysis": None,
+                "review": None,
+                "prompt_versions": prompt_versions(),
+            },
+            prompt_version=composite_prompt_version(),
             rubric_version=RUBRIC_VERSION,
             pricing_version=load_pricing().pricing_version,
         )

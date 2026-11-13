@@ -69,7 +69,14 @@ class SemanticDedupOutput(BaseModel):
 
 
 class RuleAnswer(BaseModel):
-    rule: str
+    rule: Literal[
+        "not_software",
+        "data_access",
+        "sales_dependency",
+        "llm_wrapper",
+        "over_scope",
+        "redundant",
+    ]
     answer: Literal["yes", "no", "uncertain"]
     reason: str
 

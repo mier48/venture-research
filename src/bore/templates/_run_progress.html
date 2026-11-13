@@ -81,7 +81,7 @@
 <h3>Ranking</h3>
 {% set published = opps|selectattr('status','eq','published')|list %}
 {% if published %}
-<div class="table-wrap">
+<div class="table-wrap card featured">
   <table class="data">
     <thead><tr><th>#</th><th>Nombre</th><th>Nota final</th><th>Confianza</th><th></th></tr></thead>
     <tbody>

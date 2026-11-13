@@ -29,6 +29,7 @@
 ## Vendorizado
 
 - `src/bore/static/htmx.min.js` — HTMX 2.0.8 (descargado de jsDelivr el 2026-11-13). Sin CDN en ejecución.
+- `src/bore/static/fonts/` — Sora autoalojada: woff2 latin y latin-ext en los pesos 400/500/600/700, del paquete npm `@fontsource/sora@5.2.0` (publicado 2025-03-01) vía jsDelivr el 2026-11-13. Licencia SIL OFL 1.1 en `OFL.txt`. Declaradas en `app.css` con `@font-face` + `font-display: swap`.
 
 ## Comandos (13.4)
 

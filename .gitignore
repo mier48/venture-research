@@ -1,10 +1,43 @@
-.venv/
-__pycache__/
-*.pyc
+# Entorno y secretos
 .env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Herramientas de calidad y tests
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Playwright / E2E
+test-results/
+playwright-report/
+playwright/.cache/
+
+# Salidas de la aplicación
 reports/
-dist/
-*.egg-info/
+*.log
+
+# IDE y sistema operativo
+.vscode/
+.idea/
+.windsurf/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Copia original de la especificación (la versionada es docs/SPEC.md)
+/especificacion_tecnica_business_idea_research_v1.1.md

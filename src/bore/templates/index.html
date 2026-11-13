@@ -1,44 +1,105 @@
 {% extends "base.html" %}
+{% from "_macros.html" import badge, progress %}
 {% block content %}
-{% if request.query_params.get('error') %}<p class="demo">No se pudo crear la ejecución.</p>{% endif %}
-<h2>Nueva investigación</h2>
-<form method="post" action="/ui/runs" class="form">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <div class="row">
-    <label>Sector <input name="sector" required maxlength="200" value="inmobiliario"></label>
-    <label>País <input name="country" maxlength="8" value="ES"></label>
-    <label>Idioma <input name="language" maxlength="16" value="es-ES"></label>
-  </div>
-  <div class="row">
-    <label>Nº máx. de ideas <input type="number" name="requested_ideas" min="1" max="20" value="5"></label>
-    <label>Umbral nota final <input type="number" name="min_final_score" min="1" max="10" step="0.1" value="7.0"></label>
-  </div>
-  <fieldset>
-    <legend>Límites de la ejecución</legend>
-    <div class="row">
-      <label>USD máx. <input type="number" name="max_usd" min="0" step="0.5" value="10.0"></label>
-      <label>Búsquedas web máx. <input type="number" name="max_web_search_calls" min="0" value="180"></label>
-      <label>Llamadas al modelo máx. <input type="number" name="max_model_calls" min="0" value="200"></label>
-      <label>Duración máx. (s) <input type="number" name="max_duration_seconds" min="60" value="5400"></label>
+{% if request.query_params.get('error') %}
+<div class="alert alert-danger">No se pudo crear la ejecución.</div>
+{% endif %}
+
+<div class="card">
+  <h2 class="card-title">Nueva investigación</h2>
+  <form method="post" action="/ui/runs" class="form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="form-grid">
+      <div class="field">
+        <label for="f-sector">Sector</label>
+        <input id="f-sector" name="sector" required maxlength="200" value="inmobiliario">
+        <p class="help">Sector a investigar (p. ej. inmobiliario).</p>
+      </div>
+      <div class="field">
+        <label for="f-country">País</label>
+        <input id="f-country" name="country" maxlength="8" value="ES">
+        <p class="help">Código de país de la investigación.</p>
+      </div>
+      <div class="field">
+        <label for="f-language">Idioma</label>
+        <input id="f-language" name="language" maxlength="16" value="es-ES">
+        <p class="help">Idioma de las consultas y del informe.</p>
+      </div>
+      <div class="field">
+        <label for="f-ideas">Nº máx. de ideas</label>
+        <input id="f-ideas" type="number" name="requested_ideas" min="1" max="20" value="5">
+        <p class="help">Ideas publicadas como máximo.</p>
+      </div>
+      <div class="field">
+        <label for="f-threshold">Umbral nota final</label>
+        <input id="f-threshold" type="number" name="min_final_score" min="1" max="10" step="0.1" value="7.0">
+        <p class="help">Nota mínima (1–10) para publicar.</p>
+      </div>
     </div>
-  </fieldset>
-  <label><input type="checkbox" name="offline" value="1" checked> Demo offline (datos ficticios)</label>
-  <button type="submit">Crear investigación</button>
-</form>
-<h2>Ejecuciones</h2>
-<table>
-<tr><th>Sector</th><th>Estado</th><th>Progreso</th><th>Creada</th><th>Terminada</th><th></th></tr>
-{% for r in runs %}
-<tr>
-  <td>{{ r.sector }}</td>
-  <td class="status">{{ r.status }}{% if r.is_synthetic %} <em>(DEMO)</em>{% endif %}</td>
-  <td>{{ r.progress_percent }}%</td>
-  <td>{{ r.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
-  <td>{{ r.finished_at.strftime('%Y-%m-%d %H:%M') if r.finished_at else '—' }}</td>
-  <td><a href="/runs/{{ r.id }}">ver</a></td>
-</tr>
-{% else %}
-<tr><td colspan="6">Sin ejecuciones.</td></tr>
-{% endfor %}
-</table>
+
+    <details>
+      <summary>Opciones avanzadas</summary>
+      <div class="form-grid">
+        <div class="field">
+          <label for="f-usd">USD máx.</label>
+          <input id="f-usd" type="number" name="max_usd" min="0" step="0.5" value="10.0">
+          <p class="help">Presupuesto máximo de la ejecución.</p>
+        </div>
+        <div class="field">
+          <label for="f-web">Búsquedas web máx.</label>
+          <input id="f-web" type="number" name="max_web_search_calls" min="0" value="180">
+        </div>
+        <div class="field">
+          <label for="f-calls">Llamadas al modelo máx.</label>
+          <input id="f-calls" type="number" name="max_model_calls" min="0" value="200">
+        </div>
+        <div class="field">
+          <label for="f-dur">Duración máx. (s)</label>
+          <input id="f-dur" type="number" name="max_duration_seconds" min="60" value="5400">
+        </div>
+      </div>
+    </details>
+
+    <div class="stack">
+      <label class="switch">
+        <input type="checkbox" name="offline" value="1" checked>
+        <span class="track"></span>
+        <span>Demo offline (datos ficticios)</span>
+      </label>
+      <div>
+        <button type="submit" class="btn btn-primary">Crear investigación</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <h2 class="card-title">Investigaciones</h2>
+  {% if runs %}
+  <div class="table-wrap">
+    <table class="data">
+      <thead>
+        <tr><th>Sector</th><th>Estado</th><th>Progreso</th><th>Creada</th><th>Terminada</th><th></th></tr>
+      </thead>
+      <tbody>
+      {% for r in runs %}
+        <tr>
+          <td>{{ r.sector }}</td>
+          <td>{{ badge(r.status) }}{% if r.is_synthetic %} <span class="badge badge-demo">DEMO</span>{% endif %}</td>
+          <td>{{ progress(r.progress_percent, "progress-mini") }} <small>{{ r.progress_percent }}%</small></td>
+          <td>{{ r.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+          <td>{{ r.finished_at.strftime('%Y-%m-%d %H:%M') if r.finished_at else '—' }}</td>
+          <td class="actions"><a href="/runs/{{ r.id }}">Ver</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <span class="icon">◔</span>
+    <p>Aún no hay investigaciones. Crea la primera con el formulario superior.</p>
+  </div>
+  {% endif %}
+</div>
 {% endblock %}

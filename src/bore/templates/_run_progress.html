@@ -1,64 +1,127 @@
-<h2>{{ run.sector }} — <span class="status">{{ run.status }}</span>
-{% if run.is_synthetic %}<em class="demo-inline">DEMO</em>{% endif %}</h2>
-<p>Etapa actual: <strong>{{ run.current_stage or '—' }}</strong> · Progreso: {{ run.progress_percent }}%</p>
-{% if run.stop_reason %}<p>Parada: <strong>{{ run.stop_reason }}</strong>{% if run.error_code %} · Error: {{ run.error_code }}{% endif %}</p>{% endif %}
-{% if run.error_message_safe %}<p class="warn">{{ run.error_message_safe }}</p>{% endif %}
+{% from "_macros.html" import badge, confidence, score, progress, stage_name, stop_reason, rejection, status_explain %}
+<div class="run-header">
+  <h2>{{ run.sector }}</h2>
+  {{ badge(run.status) }}
+  {% if run.is_synthetic %}<span class="badge badge-demo">DEMO</span>{% endif %}
+</div>
+
+<p class="muted">Progreso de la ejecución · Etapa actual:
+  <strong>{{ stage_name(run.current_stage) if run.current_stage else '—' }}</strong></p>
+<div class="progress progress-lg"><i style="width: {{ run.progress_percent|int }}%"></i></div>
+<p class="num progress-pct"><strong>{{ run.progress_percent }}%</strong></p>
+
+{% if run.stop_reason or run.error_code or run.error_message_safe %}
+<div class="alert {% if run.status in ['failed'] %}alert-danger{% else %}alert-warning{% endif %}">
+  {% if run.stop_reason %}<strong>Parada:</strong> {{ stop_reason(run.stop_reason) }}{% endif %}
+  {% if run.error_code %} · <strong>Error:</strong> {{ run.error_code }}{% endif %}
+  {% if run.error_message_safe %}<br>{{ run.error_message_safe }}{% endif %}
+</div>
+{% endif %}
 
 <h3>Etapas</h3>
-<ol class="stages">
+<ol class="stepper">
 {% for key, label in all_stages %}
   <li class="{% if key in stages_done %}done{% elif run.current_stage == key %}current{% endif %}">{{ label }}</li>
 {% endfor %}
 </ol>
 
-<p>Coste: {{ '%.4f'|format(run.actual_cost_usd or 0) }} USD{% if run.cost_is_estimated %} (estimado){% endif %}
- · llamadas al modelo: {{ run.model_calls }} · búsquedas web: {{ run.web_search_calls }}</p>
+<div class="kpi-grid">
+  <div class="kpi">
+    <div class="kpi-label">Coste (USD)</div>
+    <div class="kpi-value">{{ '%.4f'|format(run.actual_cost_usd or 0) }}</div>
+    {% if run.cost_is_estimated %}<div class="kpi-sub">estimado</div>{% endif %}
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Llamadas al modelo</div>
+    <div class="kpi-value">{{ run.model_calls }}</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Búsquedas web</div>
+    <div class="kpi-value">{{ run.web_search_calls }}</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Publicadas / generadas</div>
+    <div class="kpi-value">{{ stats.get('published', 0) }} / {{ opps|length }}</div>
+  </div>
+</div>
+
 {% set limits = run.config.get('limits', {}) %}
-<details><summary>Límites de la ejecución</summary>
-<ul>
-  <li>USD máx.: {{ limits.get('max_usd') }}</li>
-  <li>Búsquedas web máx.: {{ limits.get('max_web_search_calls') }}</li>
-  <li>Llamadas al modelo máx.: {{ limits.get('max_model_calls') }}</li>
-  <li>Duración máx.: {{ limits.get('max_duration_seconds') }} s</li>
-</ul>
+<details>
+  <summary>Límites de la ejecución</summary>
+  <ul class="list-clean">
+    <li>USD máx.: {{ limits.get('max_usd') }}</li>
+    <li>Búsquedas web máx.: {{ limits.get('max_web_search_calls') }}</li>
+    <li>Llamadas al modelo máx.: {{ limits.get('max_model_calls') }}</li>
+    <li>Duración máx.: {{ limits.get('max_duration_seconds') }} s</li>
+  </ul>
 </details>
 
 {% if run.status in ['queued','running'] %}
 <form method="post" action="/ui/runs/{{ run.id }}/cancel" class="inline">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <button type="submit">Cancelar ejecución</button>
+  <button type="submit" class="btn btn-secondary">Cancelar ejecución</button>
 </form>
 {% elif run.status in ['completed','partial','failed','cancelled'] %}
 <p>
-<a href="/api/v1/research-runs/{{ run.id }}/export?format=md">Descargar informe (Markdown)</a> ·
-<a href="/api/v1/research-runs/{{ run.id }}/export?format=json">Descargar JSON</a>
+  <a class="btn btn-primary btn-sm" href="/api/v1/research-runs/{{ run.id }}/export?format=md">Descargar informe (Markdown)</a>
+  <a class="btn btn-secondary btn-sm" href="/api/v1/research-runs/{{ run.id }}/export?format=json">Descargar JSON</a>
 </p>
-<form method="post" action="/ui/runs/{{ run.id }}/delete" class="inline">
+<form method="post" action="/ui/runs/{{ run.id }}/delete" class="inline"
+      onsubmit="return confirm('¿Borrar la ejecución y todos sus datos?')">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <button type="submit">Borrar ejecución</button>
+  <button type="submit" class="btn btn-danger btn-sm">Borrar ejecución</button>
 </form>
 {% endif %}
 
+{% if stats %}
 <h3>Recuentos por estado</h3>
-<ul>{% for k,v in stats|dictsort %}<li>{{ k }}: {{ v }}</li>{% endfor %}</ul>
+<p>{% for k, v in stats|dictsort %}<span class="chip">{{ badge(k) }} × {{ v }}</span>{% endfor %}</p>
+{% endif %}
 
 <h3>Ranking</h3>
-<table>
-<tr><th>#</th><th>Nombre</th><th>Nota final</th><th>Confianza</th><th></th></tr>
-{% for o in opps if o.status == 'published' %}
-<tr><td>{{ o.rank }}</td><td>{{ o.name }}</td><td>{{ o.final_score }}</td><td>{{ o.confidence }}</td>
-<td><a href="/opportunities/{{ o.id }}">ficha</a></td></tr>
-{% else %}<tr><td colspan="5">Sin resultados publicados.</td></tr>{% endfor %}
-</table>
+{% set published = opps|selectattr('status','eq','published')|list %}
+{% if published %}
+<div class="table-wrap">
+  <table class="data">
+    <thead><tr><th>#</th><th>Nombre</th><th>Nota final</th><th>Confianza</th><th></th></tr></thead>
+    <tbody>
+    {% for o in published %}
+      <tr>
+        <td>{{ o.rank }}</td>
+        <td>{{ o.name }}</td>
+        <td>{{ score(o.final_score) }}</td>
+        <td>{{ confidence(o.confidence) }}</td>
+        <td class="actions"><a href="/opportunities/{{ o.id }}">ficha</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="muted">Sin resultados publicados.</p>
+{% endif %}
 
+{% set rest = opps|selectattr('status','ne','published')|list %}
+{% if rest %}
 <h3>Resto de candidatas</h3>
-{% for status, group in opps|selectattr('status','ne','published')|groupby('status') %}
-<h4>{{ status }} ({{ group|length }})</h4>
-<table>
-<tr><th>Nombre</th><th>Motivo</th><th></th></tr>
-{% for o in group %}
-<tr><td>{{ o.name }}</td><td>{{ o.rejection_code or '—' }}</td>
-<td><a href="/opportunities/{{ o.id }}">ficha</a></td></tr>
+{% for status, group in rest|groupby('status') %}
+<details>
+  <summary>{{ badge(status) }} · {{ group|length }}</summary>
+  <p class="muted">{{ status_explain(status) }}</p>
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th>Nombre</th><th>Motivo</th><th></th></tr></thead>
+      <tbody>
+      {% for o in group %}
+        <tr>
+          <td>{{ o.name }}</td>
+          <td>{{ rejection(o.rejection_code) }}</td>
+          <td class="actions"><a href="/opportunities/{{ o.id }}">ficha</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
 {% endfor %}
-</table>
-{% endfor %}
+{% endif %}

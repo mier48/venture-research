@@ -1,0 +1,185 @@
+{% set RUN_STATUS = {
+  "queued": ("En cola", "gray"),
+  "running": ("En curso", "blue"),
+  "completed": ("Completada", "green"),
+  "partial": ("Parcial", "amber"),
+  "failed": ("Fallida", "red"),
+  "cancelled": ("Cancelada", "gray"),
+} %}
+
+{% set OPP_STATUS = {
+  "published": ("Publicada", "green"),
+  "scored": ("Cualificada no publicada", "indigo"),
+  "below_threshold": ("Bajo umbral", "amber"),
+  "insufficient_evidence": ("Evidencia insuficiente", "amber"),
+  "not_reviewed": ("Sin revisión crítica", "gray"),
+  "not_shortlisted": ("No seleccionada", "gray"),
+  "needs_manual_review": ("Revisión manual", "blue"),
+  "rejected": ("Rechazada", "red"),
+  "duplicate": ("Duplicada", "gray"),
+} %}
+
+{% set CONFIDENCE = {
+  "high": ("Alta", "green"),
+  "medium": ("Media", "amber"),
+  "low": ("Baja", "red"),
+  "alta": ("Alta", "green"),
+  "media": ("Media", "amber"),
+  "baja": ("Baja", "red"),
+} %}
+
+{% set CRITERIA = {
+  "demand": ("Demanda", 25, true),
+  "distribution": ("Distribución", 20, true),
+  "competition": ("Competencia", 15, true),
+  "monetization": ("Monetización", 15, true),
+  "technical": ("Viabilidad técnica", 10, false),
+  "ai_defensibility": ("Defensa frente a LLM", 10, false),
+  "operational_legal": ("Riesgo legal-operativo", 5, false),
+} %}
+
+{% set STAGES = {
+  "sector_mapping": "Mapa del sector",
+  "demand_research": "Investigación de demanda",
+  "candidate_generation": "Generación de candidatas",
+  "eligibility_filter": "Elegibilidad",
+  "shallow_screening": "Sondeo superficial",
+  "market_validation": "Validación de mercado",
+  "evidence_audit": "Auditoría de evidencia",
+  "scoring": "Puntuación",
+  "adversarial_review": "Revisión adversaria",
+  "ranking_and_report": "Ranking e informe",
+} %}
+
+{% set STOP_REASONS = {
+  "cancelled_by_user": "Cancelada por el usuario",
+  "worker_lost": "Worker perdido",
+  "budget_exceeded": "Presupuesto agotado",
+  "search_quota_exceeded": "Cuota de búsquedas agotada",
+  "provider_error": "Error del proveedor",
+  "internal_error": "Error interno",
+  "timeout": "Tiempo máximo agotado",
+} %}
+
+{% set REJECTIONS = {
+  "not_software": "No es software",
+  "data_access": "Acceso a datos",
+  "sales_dependency": "Dependencia de ventas",
+  "llm_wrapper": "Envoltorio de LLM",
+  "over_scope": "Excede el alcance",
+  "redundant": "Redundante",
+  "competition_unknown": "Competencia desconocida",
+} %}
+
+{% set ACCESS = {
+  "ok": ("Disponible", "green"),
+  "blocked": ("Bloqueada", "amber"),
+  "blocked_by_policy": ("Bloqueada por política", "amber"),
+  "paywall": ("Muro de pago", "amber"),
+  "not_found": ("No encontrada", "gray"),
+  "error": ("Error", "red"),
+  "timeout": ("Tiempo agotado", "red"),
+} %}
+
+{% set STATUS_EXPLAIN = {
+  "scored": "Supera todas las puertas pero excede el número de ideas solicitadas.",
+  "below_threshold": "Nota final por debajo del umbral configurado.",
+  "insufficient_evidence": "No hay evidencia suficiente para una nota fiable.",
+  "not_reviewed": "Sin revisión crítica; no puede publicarse.",
+  "not_shortlisted": "No entró en la lista corta del sondeo.",
+  "needs_manual_review": "Requiere revisión manual antes de decidir.",
+  "rejected": "Descartada por los filtros de elegibilidad.",
+  "duplicate": "Equivalente a otra candidata ya conservada.",
+} %}
+
+{% set VERDICTS = {
+  "keep_researching": ("Seguir investigando", "blue"),
+  "commercial_validation": ("Validación comercial", "green"),
+  "discard": ("Descartar", "red"),
+} %}
+{% set COMP_CATEGORY = {
+  "direct": ("Directo", "indigo"),
+  "indirect": ("Indirecto", "blue"),
+  "substitute": ("Sustituto", "gray"),
+} %}
+{% set PRICE_STATUS = {
+  "verified": ("Verificado", "green"),
+  "unverified": ("No verificado", "amber"),
+  "not_public": ("No público", "gray"),
+} %}
+
+{% macro verdict(code) -%}
+  {% set label, color = VERDICTS.get(code, (code or "—", "gray")) %}
+  <span class="badge badge-{{ color }}">{{ label }}</span>
+{%- endmacro %}
+{% macro comp_category(code) -%}
+  {% set label, color = COMP_CATEGORY.get(code, (code or "—", "gray")) %}
+  <span class="badge badge-{{ color }}">{{ label }}</span>
+{%- endmacro %}
+{% macro price_status(code) -%}
+  {% set label, color = PRICE_STATUS.get(code, (code or "—", "gray")) %}
+  <span class="badge badge-{{ color }}">{{ label }}</span>
+{%- endmacro %}
+
+{% macro badge(status) -%}
+  {% set label, color = RUN_STATUS.get(status) or OPP_STATUS.get(status) or (status, "gray") %}
+  <span class="badge badge-{{ color }}" data-status="{{ status }}">
+    {%- if status == "running" %}<span class="dot pulse"></span>{% endif -%}
+    {{ label }}
+  </span>
+{%- endmacro %}
+
+{% macro confidence(level) -%}
+  {% set label, color = CONFIDENCE.get(level or "", ((level or "—"), "gray")) %}
+  <span class="badge badge-{{ color }}">{{ label }}</span>
+{%- endmacro %}
+
+{% macro claim_label(claim) -%}
+  {% if claim.verification_status == "verified" %}
+    {% set label, color = "verificada", "green" %}
+  {% elif claim.verification_status == "partially_supported" %}
+    {% set label, color = "respaldo parcial", "amber" %}
+  {% elif claim.verification_status == "contradicted" %}
+    {% set label, color = "contradicha", "red" %}
+  {% elif claim.kind == "estimate" %}
+    {% set label, color = "estimación", "violet" %}
+  {% elif claim.kind == "hypothesis" %}
+    {% set label, color = "hipótesis", "blue" %}
+  {% else %}
+    {% set label, color = "no verificada", "gray" %}
+  {% endif %}
+  <span class="badge badge-{{ color }}">{{ label }}{% if claim.disputed %} · disputada{% endif %}</span>
+{%- endmacro %}
+
+{% macro ext_link(url, text) -%}
+  {% if url and (url.startswith("http://") or url.startswith("https://")) %}
+    <a href="{{ url }}" rel="noopener noreferrer nofollow">{{ text }}</a>
+  {%- else %}{{ text }}{% endif %}
+{%- endmacro %}
+
+{% macro score(value) -%}
+  {% if value is not none %}
+    {% set v = value|float %}
+    {% set cls = "score-good" if v >= 7 else ("score-mid" if v >= 5 else "score-bad") %}
+    <span class="score"><span class="score-num">{{ value }}</span>
+    <span class="score-bar {{ cls }}"><i style="width: {{ (v * 10)|round(0, 'floor')|int }}%"></i></span></span>
+  {% else %}<span class="muted">—</span>{% endif %}
+{%- endmacro %}
+
+{% macro progress(pct, cls="") -%}
+  <span class="progress{% if cls %} {{ cls }}{% endif %}"><i style="width: {{ pct|int }}%"></i></span>
+{%- endmacro %}
+
+{% macro criterion_name(code) -%}
+  {% set c = CRITERIA.get(code) %}
+  {% if c %}{{ c[0] }}{% if c[2] %} <span class="tag-critical">crítico</span>{% endif %} <span class="muted">({{ c[1] }}%)</span>{% else %}{{ code }}{% endif %}
+{%- endmacro %}
+
+{% macro stage_name(code) -%}{{ STAGES.get(code, code) }}{%- endmacro %}
+{% macro stop_reason(code) -%}{{ STOP_REASONS.get(code, code) }}{%- endmacro %}
+{% macro rejection(code) -%}{{ REJECTIONS.get(code, code or "—") }}{%- endmacro %}
+{% macro access_badge(status) -%}
+  {% set label, color = ACCESS.get(status, (status or "—", "gray")) %}
+  <span class="badge badge-{{ color }}">{{ label }}</span>
+{%- endmacro %}
+{% macro status_explain(status) -%}{{ STATUS_EXPLAIN.get(status, "") }}{%- endmacro %}

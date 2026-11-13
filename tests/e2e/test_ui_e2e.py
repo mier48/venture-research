@@ -34,7 +34,7 @@ def test_full_offline_flow(page, base_url):
     expect(page.locator("h2")).to_contain_text("inmobiliario")
     expect(page.get_by_text("Progreso")).to_be_visible()
     page.wait_for_selector("text=Descargar informe", timeout=240_000)
-    expect(page.locator("h2")).to_contain_text("completed")
+    expect(page.locator("[data-status='completed']")).to_be_visible()
 
     # Ranking y ficha.
     expect(page.locator("h3", has_text="Ranking")).to_be_visible()

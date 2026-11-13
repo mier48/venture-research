@@ -1,7 +1,11 @@
 {% extends "base.html" %}
+{% block title %}{{ run.sector }} — Venture Research{% endblock %}
+{% block demo_banner %}
+{% if run.is_synthetic %}<div class="demo-banner">DEMO — datos ficticios</div>{% endif %}
+{% endblock %}
 {% block content %}
-{% if run.is_synthetic %}<div class="demo">DEMO — datos ficticios</div>{% endif %}
-<div id="run-progress" hx-get="/runs/{{ run.id }}/progress" hx-trigger="every 3s" hx-swap="innerHTML">
+<div id="run-progress" hx-get="/runs/{{ run.id }}/progress" hx-trigger="every 3s"
+     hx-swap="innerHTML" aria-live="polite">
 {% include "_run_progress.html" %}
 </div>
 {% endblock %}

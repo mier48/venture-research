@@ -237,6 +237,7 @@ async def ui_opportunity(request: Request, opp_id: uuid.UUID) -> HTMLResponse:
         claims = await repo.list_claims(s, opp["research_run_id"], opportunity_id=opp_id)
         scores_i = await repo.list_criterion_scores(s, opp_id, revision="initial")
         scores_f = await repo.list_criterion_scores(s, opp_id, revision="final")
+        reviews = await repo.list_reviews(s, opp_id)
         links = await repo.list_claim_sources(s, [c["id"] for c in claims])
         src_ids = {x["source_id"] for x in links}
         sources = [
@@ -255,5 +256,6 @@ async def ui_opportunity(request: Request, opp_id: uuid.UUID) -> HTMLResponse:
             "scores_i": {s["criterion_code"]: s for s in scores_i},
             "scores_f": {s["criterion_code"]: s for s in scores_f},
             "sources": sources,
+            "reviews": reviews,
         },
     )

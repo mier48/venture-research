@@ -1,75 +1,226 @@
 {% extends "base.html" %}
+{% from "_macros.html" import badge, confidence, score, criterion_name, claim_label, ext_link, access_badge, rejection, verdict, comp_category, price_status %}
+{% block title %}{{ opp.name }} — Venture Research{% endblock %}
+{% block demo_banner %}
+{% if run and run.is_synthetic %}<div class="demo-banner">DEMO — datos ficticios</div>{% endif %}
+{% endblock %}
 {% block content %}
-{% if run and run.is_synthetic %}<div class="demo">DEMO — datos ficticios</div>{% endif %}
-<h2>{{ opp.name }}</h2>
-<p>Estado: <span class="status">{{ opp.status }}</span>
-{% if opp.final_score %} · Nota final: <strong>{{ opp.final_score }}</strong>{% endif %}
-{% if opp.confidence %} · Confianza: {{ opp.confidence }}{% endif %}
-{% if opp.rejection_code %} · Motivo: {{ opp.rejection_code }}{% endif %}</p>
 <p><a href="/runs/{{ run.id }}">← Volver a la ejecución</a></p>
 
-<p><strong>Segmento:</strong> {{ opp.customer_segment }} · <strong>Comprador:</strong> {{ opp.buyer }}</p>
-<p><strong>Problema:</strong> {{ opp.problem }}</p>
-<p><strong>Solución:</strong> {{ opp.solution }}</p>
-<p><strong>Propuesta de valor:</strong> {{ opp.value_proposition }}</p>
-<p><strong>Modelo de negocio:</strong> {{ opp.business_model }}</p>
-<p><strong>MVP:</strong> {{ opp.mvp_scope }}</p>
-<p><strong>Excluidas:</strong> {{ opp.excluded_features }}</p>
-{% if opp.acquisition %}<p><strong>Adquisición:</strong> {{ (opp.acquisition.channels or [])|join(', ') }}{% if opp.acquisition.notes %} — {{ opp.acquisition.notes|join('; ') }}{% endif %}</p>{% endif %}
-{% if opp.assumptions %}<p><strong>Supuestos:</strong> {{ (opp.assumptions['items'] if opp.assumptions is mapping else opp.assumptions)|join('; ') }}</p>{% endif %}
-{% if opp.unit_economics %}
-<h3>Economía unitaria (hipótesis)</h3>
-<ul>
-  <li>Precio: {{ opp.unit_economics.price_eur_month }} €/mes</li>
-  <li>Coste variable: {{ opp.unit_economics.variable_cost_eur_month }} €/mes · fijos: {{ opp.unit_economics.fixed_cost_eur_month }} €/mes</li>
-  <li>Clientes de pago necesarios: {{ opp.unit_economics.required_paying_customers or 'n/d' }}</li>
-  {% if opp.unit_economics.penetration_pct %}<li>Penetración sobre universo verificado: {{ opp.unit_economics.penetration_pct }}%</li>{% endif %}
-</ul>
-{% endif %}
-{% if opp.risks %}
-<h3>Riesgos y barreras</h3>
-<ul>
-{% for note in opp.risks.technical_notes or [] %}<li>Técnica: {{ note }}</li>{% endfor %}
-{% for note in opp.risks.data_barriers or [] %}<li>Datos: {{ note }}</li>{% endfor %}
-{% for note in opp.risks.legal_operational_risks or [] %}<li>Legal-operativa: {{ note }}</li>{% endfor %}
-{% if opp.risks.llm_substitution_risk %}<li>Sustitución por LLM: {{ opp.risks.llm_substitution_risk }}</li>{% endif %}
-{% if opp.risks.estimates %}<li>Estimaciones — alcance: {{ opp.risks.estimates.technical_scope }}; mantenimiento: {{ opp.risks.estimates.maintenance_cost }}; semanas MVP: {{ opp.risks.estimates.mvp_weeks }}</li>{% endif %}
-</ul>
-{% endif %}
+<div class="opp-header">
+  <h2>{{ opp.name }}</h2>
+  {{ badge(opp.status) }}
+  {% if opp.confidence %}{{ confidence(opp.confidence) }}{% endif %}
+  {% if opp.final_score is not none %}<span class="score"><span class="score-num big">{{ opp.final_score }}</span></span>{% endif %}
+  {% if opp.rejection_code %}<span class="muted">Motivo: {{ rejection(opp.rejection_code) }}</span>{% endif %}
+</div>
 
-<h3>Criterios</h3>
-<table><tr><th>Criterio</th><th>Inicial</th><th>Final</th><th>Δ</th><th>Confianza</th><th>Justificación</th></tr>
-{% for code in ['demand','distribution','competition','monetization','technical','ai_defensibility','operational_legal'] %}
-{% set si = scores_i.get(code) %}{% set sf = scores_f.get(code) %}
-<tr><td>{{ code }}</td>
-<td>{{ si.score if si and si.score is not none else '—' }}</td>
-<td>{{ sf.score if sf and sf.score is not none else '—' }}</td>
-<td>{% if si and sf and si.score is not none and sf.score is not none %}{{ sf.score - si.score }}{% else %}—{% endif %}</td>
-<td>{{ (sf or si or {}).confidence or '—' }}</td>
-<td>{{ (sf or si or {}).rationale or '—' }}</td></tr>
-{% endfor %}
-</table>
+<div class="grid-2">
+  <div>
+    <div class="card">
+      <h3 class="card-title">Problema y comprador</h3>
+      <p><strong>Segmento:</strong> {{ opp.customer_segment }}</p>
+      <p><strong>Comprador:</strong> {{ opp.buyer }}</p>
+      <p><strong>Problema:</strong> {{ opp.problem }}</p>
+    </div>
 
-<h3>Competidores</h3>
-<table><tr><th>Nombre</th><th>Categoría</th><th>Posicionamiento</th><th>Precio</th><th>Estado</th><th>Web</th></tr>
-{% for c in competitors %}
-<tr>
-<td>{{ c.name }}</td><td>{{ c.category }}</td><td>{{ c.positioning }}</td>
-<td>{% if c.price_value is not none %}{{ c.price_value }} {{ c.price_currency }}/{{ c.price_unit }}{% else %}no verificado{% endif %}</td>
-<td>{{ c.price_status }}</td>
-<td>{% if c.website_url and c.website_url.startswith('http') %}<a href="{{ c.website_url }}" rel="noopener noreferrer nofollow">enlace</a>{% else %}—{% endif %}</td>
-</tr>
-{% else %}<tr><td colspan="6">Sin competidores registrados.</td></tr>{% endfor %}
-</table>
+    <div class="card">
+      <h3 class="card-title">Propuesta y solución</h3>
+      <p><strong>Solución:</strong> {{ opp.solution }}</p>
+      <p><strong>Propuesta de valor:</strong> {{ opp.value_proposition }}</p>
+      <p><strong>Modelo de negocio:</strong> {{ opp.business_model }}</p>
+    </div>
 
-<h3>Afirmaciones</h3>
-<ul>{% for c in claims %}
-<li><em>[{{ c.kind }} · {{ c.verification_status }}{% if c.disputed %}, disputada{% endif %}]</em> {{ c.text }}</li>
-{% endfor %}</ul>
+    <div class="card">
+      <h3 class="card-title">MVP</h3>
+      {% set mvp = opp.mvp_scope if opp.mvp_scope is sequence and opp.mvp_scope is not string else (opp.mvp_scope['items'] if opp.mvp_scope is mapping else []) %}
+      {% if mvp %}
+      <ul class="list-clean">{% for f in mvp %}<li>{{ f }}</li>{% endfor %}</ul>
+      {% else %}<p class="muted">Sin alcance MVP definido.</p>{% endif %}
+      {% set excl = opp.excluded_features if opp.excluded_features is sequence and opp.excluded_features is not string else (opp.excluded_features['items'] if opp.excluded_features is mapping else []) %}
+      {% if excl %}
+      <p class="section-label">Funcionalidades excluidas</p>
+      <ul class="list-clean">{% for f in excl %}<li>{{ f }}</li>{% endfor %}</ul>
+      {% endif %}
+    </div>
 
-<h3>Fuentes</h3>
-<ol>{% for s in sources %}
-<li>{% if s.url.startswith('http://') or s.url.startswith('https://') %}<a href="{{ s.url }}" rel="noopener noreferrer nofollow">{{ s.title or s.url }}</a>{% else %}{{ s.url }}{% endif %}
- — {{ s.access_status }}</li>
-{% endfor %}</ol>
+    {% if opp.acquisition %}
+    <div class="card">
+      <h3 class="card-title">Adquisición</h3>
+      {% set channels = opp.acquisition['channels'] if opp.acquisition is mapping else opp.acquisition %}
+      {% if channels %}<p><strong>Canales:</strong> {{ channels|join(', ') }}</p>{% endif %}
+      {% if opp.acquisition is mapping and opp.acquisition.notes %}
+      <ul class="list-clean">{% for n in opp.acquisition.notes %}<li>{{ n }}</li>{% endfor %}</ul>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {% if opp.assumptions %}
+    <div class="card">
+      <h3 class="card-title">Supuestos</h3>
+      <ul class="list-clean">
+      {% for a in (opp.assumptions['items'] if opp.assumptions is mapping else opp.assumptions) %}<li>{{ a }}</li>{% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+
+    {% if opp.risks %}
+    <div class="card">
+      <h3 class="card-title">Riesgos y barreras</h3>
+      {% if opp.risks.technical_notes %}
+      <p class="section-label">Técnicas</p>
+      <ul class="list-clean">{% for n in opp.risks.technical_notes %}<li>{{ n }}</li>{% endfor %}</ul>
+      {% endif %}
+      {% if opp.risks.data_barriers %}
+      <p class="section-label">Datos</p>
+      <ul class="list-clean">{% for n in opp.risks.data_barriers %}<li>{{ n }}</li>{% endfor %}</ul>
+      {% endif %}
+      {% if opp.risks.legal_operational_risks %}
+      <p class="section-label">Legal-operativas</p>
+      <ul class="list-clean">{% for n in opp.risks.legal_operational_risks %}<li>{{ n }}</li>{% endfor %}</ul>
+      {% endif %}
+      {% if opp.risks.llm_substitution_risk %}
+      <p><strong>Sustitución por LLM:</strong> {{ opp.risks.llm_substitution_risk }}</p>
+      {% endif %}
+      {% if opp.risks.estimates %}
+      <p class="section-label">Estimaciones</p>
+      <ul class="list-clean">
+        <li>Alcance técnico: {{ opp.risks.estimates.technical_scope }} <span class="badge badge-violet">estimación</span></li>
+        <li>Coste de mantenimiento: {{ opp.risks.estimates.maintenance_cost }} <span class="badge badge-violet">estimación</span></li>
+        <li>Semanas MVP: {{ opp.risks.estimates.mvp_weeks }} <span class="badge badge-violet">estimación</span></li>
+      </ul>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <div class="card">
+      <h3 class="card-title">Criterios</h3>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th>Criterio</th><th>Inicial</th><th>Final</th><th>Δ</th><th>Confianza</th><th>Justificación</th></tr></thead>
+          <tbody>
+          {% for code in ['demand','distribution','competition','monetization','technical','ai_defensibility','operational_legal'] %}
+            {% set si = scores_i.get(code) %}{% set sf = scores_f.get(code) %}
+            <tr>
+              <td>{{ criterion_name(code) }}</td>
+              <td>{{ si.score if si and si.score is not none else '—' }}</td>
+              <td>{{ sf.score if sf and sf.score is not none else '—' }}</td>
+              <td>
+                {% if si and sf and si.score is not none and sf.score is not none %}
+                  {% set d = sf.score - si.score %}
+                  {% if d > 0 %}<span class="delta-pos">+{{ d }}</span>
+                  {% elif d < 0 %}<span class="delta-neg">{{ d }}</span>
+                  {% else %}<span class="muted">0</span>{% endif %}
+                {% else %}—{% endif %}
+              </td>
+              <td>{{ confidence((sf or si or {}).confidence) }}</td>
+              <td>{{ (sf or si or {}).rationale or '—' }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 class="card-title">Competidores</h3>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th>Nombre</th><th>Categoría</th><th>Posicionamiento</th><th>Precio</th><th>Estado</th><th>Web</th></tr></thead>
+          <tbody>
+          {% for c in competitors %}
+            <tr>
+              <td>{{ c.name }}</td>
+              <td>{{ comp_category(c.category) }}</td>
+              <td>{{ c.positioning }}</td>
+              <td>{% if c.price_value is not none %}{{ c.price_value }} {{ c.price_currency }}/{{ c.price_unit }}{% else %}no verificado{% endif %}</td>
+              <td>{{ price_status(c.price_status) }}</td>
+              <td>{{ ext_link(c.website_url, "enlace") if c.website_url else "—" }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="6" class="muted">Sin competidores registrados.</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 class="card-title">Afirmaciones</h3>
+      {% for crit, group in claims|groupby('criterion_code') %}
+        <p class="section-label">{{ criterion_name(crit) if crit else 'Sin criterio asignado' }}</p>
+        <ul class="list-clean">
+        {% for c in group %}
+          <li>{{ claim_label(c) }} {{ c.text }}</li>
+        {% endfor %}
+        </ul>
+      {% else %}
+        <p class="muted">Sin afirmaciones.</p>
+      {% endfor %}
+    </div>
+
+    <div class="card">
+      <h3 class="card-title">Fuentes</h3>
+      {% if sources %}
+      <ol class="sources-list">
+      {% for s in sources %}
+        <li>
+          {{ ext_link(s.url, s.title or s.url) }}
+          <span class="domain">— {{ s.registrable_domain or s.url }}{% if s.retrieved_at %} · consultada {{ s.retrieved_at.strftime('%Y-%m-%d') }}{% endif %}</span>
+          {{ access_badge(s.access_status) }}
+        </li>
+      {% endfor %}
+      </ol>
+      {% else %}
+      <p class="muted">Sin fuentes registradas.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <aside class="stack">
+    <div class="card">
+      <h3 class="card-title">Resumen</h3>
+      <p><strong>Estado:</strong> {{ badge(opp.status) }}</p>
+      {% if opp.final_score is not none %}<p><strong>Nota final:</strong> {{ score(opp.final_score) }}</p>{% endif %}
+      {% if opp.confidence %}<p><strong>Confianza:</strong> {{ confidence(opp.confidence) }}</p>{% endif %}
+      {% if opp.rank %}<p><strong>Posición:</strong> #{{ opp.rank }}</p>{% endif %}
+      {% if opp.rejection_code %}<p><strong>Motivo:</strong> {{ rejection(opp.rejection_code) }}</p>{% endif %}
+    </div>
+
+    {% if opp.unit_economics %}
+    <div class="card">
+      <h3 class="card-title">Economía unitaria <span class="badge badge-blue">Hipótesis de trabajo</span></h3>
+      <ul class="list-clean">
+        <li>Precio: {{ opp.unit_economics.price_eur_month }} €/mes</li>
+        <li>Coste variable: {{ opp.unit_economics.variable_cost_eur_month }} €/mes · fijos: {{ opp.unit_economics.fixed_cost_eur_month }} €/mes</li>
+        {% if opp.unit_economics.cac_eur %}<li>CAC: {{ opp.unit_economics.cac_eur }} €</li>{% endif %}
+        <li>Clientes de pago necesarios: {{ opp.unit_economics.required_paying_customers or 'n/d' }}</li>
+        {% if opp.unit_economics.buyer_universe_customers %}<li>Universo de compradores: {{ opp.unit_economics.buyer_universe_customers }}</li>{% endif %}
+        {% if opp.unit_economics.penetration_pct %}<li>Penetración sobre universo verificado: {{ opp.unit_economics.penetration_pct }}%</li>{% endif %}
+      </ul>
+    </div>
+    {% endif %}
+
+    {% if reviews %}
+    <div class="card">
+      <h3 class="card-title">Revisión crítica</h3>
+      {% for r in reviews %}
+        <p><strong>Veredicto:</strong> {{ verdict(r.final_verdict) }}</p>
+        {% if r.objections %}
+        <p class="section-label">Objeciones</p>
+        <ul class="list-clean">
+          {% for o in r.objections %}<li>{{ o }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        {% if r.recommended_changes %}
+        <p class="section-label">Cambios recomendados</p>
+        <ul class="list-clean">
+          {% for ch in r.recommended_changes %}<li>{{ ch }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+      {% endfor %}
+    </div>
+    {% endif %}
+  </aside>
+</div>
 {% endblock %}

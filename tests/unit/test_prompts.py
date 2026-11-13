@@ -101,7 +101,7 @@ def test_composite_prompt_version_covers_all_prompts():
     assert all(v != "unknown" for v in versions.values())
     composite = composite_prompt_version()
     assert composite.startswith("bore-prompts:")
-    assert prompt_version("sector_mapper", "research") == "sector_mapper.research-v2"
+    assert prompt_version("sector_mapper", "research") == "sector_mapper.research-v3"
 
 
 def _literal_values(annotation) -> set:

@@ -1,5 +1,8 @@
 """Integración: pipeline offline íntegro con fakes + prompt injection."""
 
+import asyncio
+import uuid
+
 import pytest
 import sqlalchemy as sa
 
@@ -308,3 +311,53 @@ async def test_two_jobs_each_get_fresh_engine(db, monkeypatch):
     async with db() as s:
         assert (await repo.get_run(s, rid1))["status"] == "completed"
         assert (await repo.get_run(s, rid2))["status"] == "completed"
+
+
+async def test_persist_sources_concurrent_no_deadlock(db, run_id):
+    """Dos tareas concurrentes persisten las mismas 50 URL en orden inverso,
+    20 repeticiones: sin deadlock, ids estables por canonical_url, sin
+    duplicados (D45)."""
+    from types import SimpleNamespace
+
+    from bore.db.tables import sources as sources_table
+    from bore.orchestration.stages import _persist_sources
+    from bore.providers.contracts import ProviderSource
+
+    urls = [f"https://example-{i}.com/articulo?utm=1" for i in range(50)]
+
+    def _srcs(order: list[int]) -> list[ProviderSource]:
+        return [
+            ProviderSource(
+                ref=f"S{n + 1}",
+                url=urls[i],
+                title=f"Título {i}",
+                origin="source_list",
+            )
+            for n, i in enumerate(order)
+        ]
+
+    ctx = SimpleNamespace(run_id=run_id, session_factory=db)
+    forward, backward = list(range(50)), list(reversed(range(50)))
+    first_map: dict[str, uuid.UUID] | None = None
+    for _ in range(20):
+        map_a, map_b = await asyncio.gather(
+            _persist_sources(ctx, _srcs(forward)),
+            _persist_sources(ctx, _srcs(backward)),
+        )
+        assert len(map_a) == 50 and len(map_b) == 50
+        if first_map is None:
+            first_map = map_a
+        # Mismo canonical_url -> mismo source_id en ambas tareas y repeticiones.
+        for n, i in enumerate(forward):
+            assert map_a[f"S{n + 1}"] == map_b[f"S{50 - i}"]
+            assert map_a[f"S{n + 1}"] == first_map[f"S{n + 1}"]
+
+    async with db() as s:
+        rows = (
+            await s.execute(
+                sa.select(sa.func.count())
+                .select_from(sources_table)
+                .where(sources_table.c.research_run_id == run_id)
+            )
+        ).scalar_one()
+        assert rows == 50

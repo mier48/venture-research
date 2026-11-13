@@ -18,7 +18,9 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+import sqlalchemy as sa
 from pydantic import BaseModel
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bore.agents.prompt_registry import render_prompt
@@ -29,6 +31,8 @@ from bore.agents.schemas import (
     MarketValidationOutput,
 )
 from bore.db import repositories as repo
+from bore.db.retry import with_db_retry
+from bore.db.tables import sources as sources_table
 from bore.domain import confidence as confidence_mod
 from bore.domain import deduplication, eligibility, evidence, scoring
 from bore.domain.enums import (
@@ -213,6 +217,9 @@ class PipelineContext:
             opportunity_id=str(opp) if opp else None,
             max_web_search_calls=searches,
         )
+        # Cerrar la transacción antes de esperar al proveedor: ningún bloqueo
+        # de BD debe retenerse durante la llamada (D45).
+        await self.session.commit()
         started = time.monotonic()
         try:
             result: ResearchResult = await self._call_with_retries(
@@ -253,6 +260,9 @@ class PipelineContext:
             output_type=_output_type_for(role),
             opportunity_id=str(opp) if opp else None,
         )
+        # Cerrar la transacción antes de esperar al proveedor: ningún bloqueo
+        # de BD debe retenerse durante la llamada (D45).
+        await self.session.commit()
         started = time.monotonic()
         try:
             result = await self._call_with_retries(lambda: self.analysis.analyze(task))
@@ -319,29 +329,57 @@ _PROVENANCE_BY_ORIGIN = {
 
 
 async def _persist_sources(ctx: PipelineContext, sources: Any) -> dict[str, uuid.UUID]:
-    """Persiste fuentes deduplicadas por canonical_url; ref -> source_id."""
-    ref_map: dict[str, uuid.UUID] = {}
-    seen: dict[str, uuid.UUID] = {}
+    """Persiste fuentes en una transacción CORTA e INDEPENDIENTE (sesión propia
+    de `session_factory`): un único INSERT multi-fila `ON CONFLICT DO NOTHING`
+    en orden ascendente de canonical_url (orden de bloqueo determinista) y un
+    SELECT para resolver los ids. Así ninguna tarea paralela retiene bloqueos
+    sobre `sources` mientras espera al proveedor (D45)."""
+    by_canon: dict[str, Any] = {}
+    canon_by_ref: dict[str, str] = {}
     for s in sources:
         canon = evidence.canonical_url(s.url)
-        if canon in seen:
-            ref_map[s.ref] = seen[canon]
-            continue
-        row = await repo.upsert_source(
-            ctx.session,
-            research_run_id=ctx.run_id,
-            url=s.url,
-            canonical_url=canon,
-            registrable_domain=evidence.registrable_domain(s.url),
-            title=_clean_text(s.title),
-            source_type="web",
-            provenance=_PROVENANCE_BY_ORIGIN[s.origin].value,
-            access_status=AccessStatus.NOT_CHECKED.value,
-            provider_reference=s.ref,
+        canon_by_ref[s.ref] = canon
+        by_canon.setdefault(canon, s)
+    if not by_canon:
+        return {}
+    canons = sorted(by_canon)
+
+    async def _work(session: AsyncSession) -> dict[str, uuid.UUID]:
+        await session.execute(
+            pg_insert(sources_table)
+            .values(
+                [
+                    {
+                        "id": uuid.uuid4(),
+                        "research_run_id": ctx.run_id,
+                        "url": by_canon[c].url,
+                        "canonical_url": c,
+                        "registrable_domain": evidence.registrable_domain(by_canon[c].url),
+                        "title": _clean_text(by_canon[c].title),
+                        "source_type": "web",
+                        "provenance": _PROVENANCE_BY_ORIGIN[by_canon[c].origin].value,
+                        "access_status": AccessStatus.NOT_CHECKED.value,
+                        "provider_reference": by_canon[c].ref,
+                    }
+                    for c in canons
+                ]
+            )
+            .on_conflict_do_nothing(constraint="uq_sources_run_canonical")
         )
-        seen[canon] = row["id"]
-        ref_map[s.ref] = row["id"]
-    return ref_map
+        rows = (
+            await session.execute(
+                sa.select(sources_table.c.id, sources_table.c.canonical_url).where(
+                    sources_table.c.research_run_id == ctx.run_id,
+                    sources_table.c.canonical_url.in_(canons),
+                )
+            )
+        ).all()
+        await session.commit()
+        return {canonical_url: sid for sid, canonical_url in rows}
+
+    async with ctx.session_factory() as session:
+        id_by_canon = await with_db_retry(session, _work)
+    return {ref: id_by_canon[canon] for ref, canon in canon_by_ref.items()}
 
 
 async def persist_claims(

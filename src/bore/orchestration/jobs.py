@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import sys
 import threading
 import uuid
@@ -112,11 +113,12 @@ def run_research_job(run_id: str) -> None:
 
 async def _async_run(run_id: uuid.UUID) -> None:
     settings = get_settings()
-    maker = db_session._sessionmaker
-    assert maker is not None
-    async with maker() as session:
+    async with db_session.job_engine(settings.database_url) as maker, maker() as session:
         run = await _get_run(session, run_id)
-        assert run is not None
+        if run is None:
+            # Trabajo huérfano: la ejecución se borró mientras estaba en cola.
+            logging.getLogger("bore.jobs").warning("job_run_missing", extra={"run_id": str(run_id)})
+            return
         config = run["config"]
         is_synthetic = run["is_synthetic"]
         from bore.db import repositories as repo
@@ -202,9 +204,7 @@ async def startup_maintenance() -> None:
     from bore.orchestration.pipeline import mark_orphaned_runs
 
     settings = get_settings()
-    maker = db_session._sessionmaker
-    assert maker is not None
-    async with maker() as session:
+    async with db_session.job_engine(settings.database_url) as maker, maker() as session:
         await mark_orphaned_runs(session, max_age_seconds=settings.bore_heartbeat_stale_seconds)
         await requeue_orphaned_queued(
             session,
@@ -230,9 +230,8 @@ def mark_enqueue_failed(run_id: uuid.UUID) -> None:
 async def _mark_failed(run_id: uuid.UUID) -> None:
     from bore.db import repositories as repo
 
-    maker = db_session._sessionmaker
-    assert maker is not None
-    async with maker() as session:
+    settings = get_settings()
+    async with db_session.job_engine(settings.database_url) as maker, maker() as session:
         await repo.update_run(
             session,
             run_id,

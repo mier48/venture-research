@@ -7,9 +7,12 @@ un reintento no duplica oportunidades, fuentes ni notas.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import hashlib
 import json
+import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -47,11 +50,35 @@ from bore.providers.contracts import (
     ResearchProvider,
     ResearchTask,
     SourceVerifier,
+    UsageRecord,
 )
 from bore.providers.errors import ProviderError
 
+logger = logging.getLogger("bore.stages")
+
 MAX_TASKS_PARALLEL = 3
 _RESERVE_SEARCHES_PER_OPP = 4
+
+
+def _clean_text(value: Any) -> Any:
+    """Elimina bytes NUL, que PostgreSQL rechaza en text y jsonb (psycopg los
+    rechaza en cliente). El texto web real puede contenerlos."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    return value
+
+
+def clean_json(value: Any) -> Any:
+    """`strip_nul` recursivo para valores que se persisten en jsonb."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {k: clean_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [clean_json(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(clean_json(v) for v in value)
+    return value
 
 
 def input_hash(payload: Any) -> str:
@@ -171,7 +198,14 @@ class PipelineContext:
             opportunity_id=str(opp) if opp else None,
             max_web_search_calls=searches,
         )
-        result: ResearchResult = await self._call_with_retries(lambda: self.research.research(task))
+        started = time.monotonic()
+        try:
+            result: ResearchResult = await self._call_with_retries(
+                lambda: self.research.research(task)
+            )
+        except Exception:
+            await self._record_failed_call(role, opp, model, started)
+            raise
         await self._record_call(result.usage, role, opp, "ok")
         self.budget.spend_stage_searches(result.usage.web_search_calls)
         if charge_reserve:
@@ -202,9 +236,27 @@ class PipelineContext:
             input_text=input_text,
             opportunity_id=str(opp) if opp else None,
         )
-        result = await self._call_with_retries(lambda: self.analysis.analyze(task))
+        started = time.monotonic()
+        try:
+            result = await self._call_with_retries(lambda: self.analysis.analyze(task))
+        except Exception:
+            await self._record_failed_call(role, opp, model, started)
+            raise
         await self._record_call(result.usage, role, opp, "ok")
         return result.output
+
+    async def _record_failed_call(
+        self, role: str, opp: uuid.UUID | None, model: str | None, started: float
+    ) -> None:
+        """Registra la llamada fallida con uso desconocido (9.3): el libro de
+        costes refleja los intentos fallidos. Nunca interrumpe el error real."""
+        with contextlib.suppress(Exception):
+            usage = UsageRecord(
+                provider=self.provider_name,
+                model=model,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            await self._record_call(usage, role, opp, "error")
 
     async def _record_call(
         self, usage: Any, role: str, opp: uuid.UUID | None, outcome: str
@@ -264,7 +316,7 @@ async def _persist_sources(ctx: PipelineContext, sources: Any) -> dict[str, uuid
             url=s.url,
             canonical_url=canon,
             registrable_domain=evidence.registrable_domain(s.url),
-            title=s.title,
+            title=_clean_text(s.title),
             source_type="web",
             provenance=_PROVENANCE_BY_ORIGIN[s.origin].value,
             access_status=AccessStatus.NOT_CHECKED.value,
@@ -309,7 +361,7 @@ async def persist_claims(
             stage=ctx.stage.value,
             origin_agent=origin_agent,
             criterion_code=c.criterion,
-            text=c.text,
+            text=_clean_text(c.text),
             kind=kind,
             verification_status=VerificationStatus.UNVERIFIED.value,
             disputed=False,
@@ -320,7 +372,7 @@ async def persist_claims(
                 claim_id,
                 ref_map[r],
                 support_type="supports",
-                evidence_quote=c.evidence_quote,
+                evidence_quote=_clean_text(c.evidence_quote),
             )
         ids.append(claim_id)
     return ids
@@ -339,7 +391,7 @@ async def audit_claims(ctx: PipelineContext, claim_ids: list[uuid.UUID]) -> None
             access_status=check.access_status.value,
             http_status=check.http_status,
             content_hash=check.content_hash,
-            excerpt=(check.excerpt or "")[:500] or None,
+            excerpt=_clean_text((check.excerpt or "")[:500]) or None,
         )
         if check.page_text:
             ctx.page_texts[str(source["id"])] = check.page_text
@@ -574,18 +626,18 @@ async def stage_candidate_generation(ctx: PipelineContext) -> dict[str, Any]:
             ctx.session,
             research_run_id=ctx.run_id,
             fingerprint=fp,
-            name=idea.name,
-            sector_subcategory=idea.sector_subcategory,
-            customer_segment=idea.customer_segment,
-            buyer=idea.buyer,
-            problem=idea.problem,
-            solution=idea.solution,
-            value_proposition=idea.value_proposition,
-            business_model=idea.business_model,
-            mvp_scope=idea.mvp_scope,
-            excluded_features=idea.excluded_features,
-            acquisition={"channels": idea.acquisition_channels},
-            assumptions={"items": idea.assumptions},
+            name=_clean_text(idea.name),
+            sector_subcategory=_clean_text(idea.sector_subcategory),
+            customer_segment=_clean_text(idea.customer_segment),
+            buyer=_clean_text(idea.buyer),
+            problem=_clean_text(idea.problem),
+            solution=_clean_text(idea.solution),
+            value_proposition=_clean_text(idea.value_proposition),
+            business_model=_clean_text(idea.business_model),
+            mvp_scope=clean_json(idea.mvp_scope),
+            excluded_features=clean_json(idea.excluded_features),
+            acquisition={"channels": clean_json(idea.acquisition_channels)},
+            assumptions={"items": clean_json(idea.assumptions)},
             status=OpportunityStatus.CANDIDATE.value,
         )
         if row is not None:
@@ -869,10 +921,10 @@ async def stage_market_validation(ctx: PipelineContext) -> dict[str, Any]:
                     task_session,
                     research_run_id=ctx.run_id,
                     opportunity_id=opp["id"],
-                    name=comp.name,
+                    name=_clean_text(comp.name),
                     website_url=comp.website_url,
-                    category=comp.category,
-                    positioning=comp.positioning,
+                    category=_clean_text(comp.category),
+                    positioning=_clean_text(comp.positioning),
                     price_value=comp.price_value,
                     price_currency=comp.price_currency,
                     price_unit=comp.price_unit,
@@ -1172,8 +1224,8 @@ async def stage_adversarial_review(
             ctx.session,
             opportunity_id=opp["id"],
             reviewer_role="critical_reviewer",
-            objections=review.objections,
-            recommended_changes=review.recommended_changes,
+            objections=clean_json(review.objections),
+            recommended_changes=clean_json(review.recommended_changes),
             final_verdict=review.final_verdict,
         )
         # Reauditoría de las nuevas afirmaciones.

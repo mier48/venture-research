@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
+import re
 import time
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bore.db import repositories as repo
@@ -37,6 +40,60 @@ from bore.providers.contracts import (
 from bore.providers.errors import ProviderError
 
 HEARTBEAT_INTERVAL_SECONDS = 15
+
+logger = logging.getLogger("bore.pipeline")
+
+_SECRET_RE = re.compile(r"sk-[A-Za-z0-9_\-]{8,}")
+
+
+def _safe_error_text(exc: BaseException) -> str:
+    """Mensaje de error persistible sin secretos."""
+    text = f"{type(exc).__name__}: {exc}"
+    return _SECRET_RE.sub("sk-***", text)[:500]
+
+
+async def _record_stage_failure(
+    work_session: AsyncSession,
+    stage_run_id: uuid.UUID,
+    run_id: uuid.UUID,
+    stage: str,
+    exc_type: str,
+    exc_msg: str,
+) -> None:
+    await repo.finish_stage_run(
+        work_session,
+        stage_run_id,
+        status="failed",
+        output=None,
+        error_code=ErrorCode.INTERNAL_ERROR.value,
+        usage=None,
+    )
+    await repo.insert_event(
+        work_session,
+        run_id,
+        level="error",
+        event_type="stage_failed",
+        stage=stage,
+        message_safe=exc_msg,
+        payload={"exception_type": exc_type},
+    )
+    await work_session.commit()
+
+
+async def _usable_session(session: AsyncSession) -> bool:
+    """True si la sesión puede seguir ejecutando sentencias."""
+    try:
+        await session.rollback()
+        await session.execute(sa.text("SELECT 1"))
+        return True
+    except Exception:
+        return False
+
+
+@contextlib.asynccontextmanager
+async def _no_close(session: AsyncSession) -> Any:
+    """Context manager que no cierra la sesión (la gestiona el bloque externo)."""
+    yield session
 
 
 async def _heartbeat_loop(session_factory: Any, run_id: uuid.UUID, stop: asyncio.Event) -> None:
@@ -128,6 +185,7 @@ async def run_pipeline(
     stop_reason: str | None = None
     error_code: str | None = None
     error_msg: str | None = None
+    reraise: BaseException | None = None
     done = 0
     try:
         for stage_index, stage_id in enumerate(STAGE_ORDER):
@@ -176,22 +234,54 @@ async def run_pipeline(
                     output = await func(ctx)
             except (BudgetExceeded, stages.PipelineCancelled):
                 raise
-            except Exception as exc:
-                await repo.finish_stage_run(
-                    session,
-                    stage_row["id"],
-                    status="failed",
-                    output=None,
-                    error_code=ErrorCode.INTERNAL_ERROR.value,
-                    usage=None,
+            except BaseException as exc:
+                # 1) Registrar el fallo ANTES de tocar la BD: si la conexión
+                # está invalidada, cualquier sentencia oculta el error real.
+                logger.exception(
+                    "stage_failed",
+                    extra={
+                        "run_id": str(run_id),
+                        "stage": stage_id.value,
+                        "event": "stage_failed",
+                    },
                 )
-                await session.commit()
-                raise exc
+                # 2) Intentar registrar en la sesión actual; si está
+                # inutilizable, usar una sesión nueva. El estado de la etapa
+                # debe quedar `failed` siempre.
+                exc_type = type(exc).__name__
+                exc_msg = _safe_error_text(exc)
+                try:
+                    await session.rollback()
+                    await _record_stage_failure(
+                        session, stage_row["id"], run_id, stage_id.value, exc_type, exc_msg
+                    )
+                except Exception:
+                    logger.warning(
+                        "Sesión principal inutilizable; registrando el fallo "
+                        "de etapa con una sesión nueva",
+                        extra={"run_id": str(run_id), "stage": stage_id.value},
+                    )
+                    try:
+                        async with session_factory() as work_session:
+                            await _record_stage_failure(
+                                work_session,
+                                stage_row["id"],
+                                run_id,
+                                stage_id.value,
+                                exc_type,
+                                exc_msg,
+                            )
+                    except Exception:
+                        logger.exception(
+                            "No se pudo registrar el fallo de etapa",
+                            extra={"run_id": str(run_id), "stage": stage_id.value},
+                        )
+                raise
             await repo.finish_stage_run(
                 session,
                 stage_row["id"],
                 status="completed",
-                output=output,
+                output=stages.clean_json(output),
                 error_code=None,
                 usage=None,
             )
@@ -229,45 +319,73 @@ async def run_pipeline(
         final_status = RunStatus.FAILED.value
         stop_reason = StopReason.PROVIDER_ERROR.value
         error_code = exc.error_code.value
-        error_msg = str(exc)[:500]
-    except Exception as exc:
+        error_msg = _safe_error_text(exc)
+        logger.warning(
+            "provider_error",
+            extra={"run_id": str(run_id), "event": "provider_error"},
+        )
+    except BaseException as exc:
+        # Incluye excepciones no-Exception (p. ej. asyncio.CancelledError):
+        # el estado final debe quedar registrado y el error nunca oculto.
         final_status = RunStatus.FAILED.value
         error_code = ErrorCode.INTERNAL_ERROR.value
-        error_msg = str(exc)[:500]
+        error_msg = _safe_error_text(exc)
+        logger.exception(
+            "run_failed",
+            extra={
+                "run_id": str(run_id),
+                "stage": ctx.stage.value if ctx.stage else None,
+                "event": "run_failed",
+            },
+        )
+        reraise = exc if not isinstance(exc, Exception) else None
     finally:
         stop_heartbeat.set()
         heartbeat_task.cancel()
         ctx.stage = None
-        # Si una sentencia falló a media etapa, la transacción queda abortada:
-        # rollback previo para poder registrar el estado final de la ejecución.
-        await session.rollback()
-        await repo.recompute_run_costs(session, run_id)
-        extra: dict[str, Any] = {}
-        trace_id = getattr(research, "last_trace_id", None)
-        if trace_id:
-            extra["trace_id"] = trace_id
-        await repo.update_run(
-            session,
-            run_id,
-            status=final_status,
-            **extra,
-            stop_reason=stop_reason,
-            finished_at=datetime.now(UTC),
-            heartbeat_at=datetime.now(UTC),
-            progress_percent=100 if final_status == RunStatus.COMPLETED.value else _progress(done),
-            error_code=error_code,
-            error_message_safe=error_msg,
-        )
-        await repo.insert_event(
-            session,
-            run_id,
-            level="info" if final_status == RunStatus.COMPLETED.value else "warning",
-            event_type="run_finished",
-            stage=None,
-            message_safe=f"Ejecución terminada: {final_status}",
-            payload={"stop_reason": stop_reason, "error_code": error_code},
-        )
-        await session.commit()
+        # Si una sentencia falló a media etapa, la transacción queda abortada
+        # o la conexión invalidada: rollback previo y, si la sesión sigue
+        # inutilizable, registrar el estado final con una sesión nueva.
+        usable = await _usable_session(session)
+        work_session = session if usable else session_factory()
+        try:
+            async with work_session if work_session is not session else _no_close(work_session):
+                await repo.recompute_run_costs(work_session, run_id)
+                extra: dict[str, Any] = {}
+                trace_id = getattr(research, "last_trace_id", None)
+                if trace_id:
+                    extra["trace_id"] = trace_id
+                await repo.update_run(
+                    work_session,
+                    run_id,
+                    status=final_status,
+                    **extra,
+                    stop_reason=stop_reason,
+                    finished_at=datetime.now(UTC),
+                    heartbeat_at=datetime.now(UTC),
+                    progress_percent=100
+                    if final_status == RunStatus.COMPLETED.value
+                    else _progress(done),
+                    error_code=error_code,
+                    error_message_safe=error_msg,
+                )
+                await repo.insert_event(
+                    work_session,
+                    run_id,
+                    level="info" if final_status == RunStatus.COMPLETED.value else "warning",
+                    event_type="run_finished",
+                    stage=None,
+                    message_safe=f"Ejecución terminada: {final_status}",
+                    payload={"stop_reason": stop_reason, "error_code": error_code},
+                )
+                await work_session.commit()
+        except Exception:
+            logger.exception(
+                "No se pudo registrar el estado final de la ejecución",
+                extra={"run_id": str(run_id)},
+            )
+    if reraise is not None:
+        raise reraise
 
 
 async def mark_orphaned_runs(session: AsyncSession, *, max_age_seconds: int = 60) -> int:

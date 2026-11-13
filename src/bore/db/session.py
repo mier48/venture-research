@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -46,3 +47,22 @@ def new_session() -> AsyncSession:
     if _sessionmaker is None:
         raise RuntimeError("Motor de base de datos no inicializado")
     return _sessionmaker()
+
+
+@asynccontextmanager
+async def job_engine(
+    database_url: str,
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Engine por trabajo: el worker ejecuta cada job con un `asyncio.run`
+    (event loop nuevo). Reutilizar el pool global entre loops distintos es
+    frágil: las conexiones psycopg abiertas por un loop pueden quedar
+    invalidadas en el siguiente. Se crea dentro del loop y se dispone siempre."""
+    engine = create_async_engine(
+        database_url,
+        pool_pre_ping=True,
+        connect_args={"prepare_threshold": None},
+    )
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()

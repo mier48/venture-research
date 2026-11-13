@@ -152,3 +152,159 @@ async def test_orphan_marked_failed(db, run_id):
         assert n >= 1
         run = await repo.get_run(s, run_id)
         assert run["status"] == "failed" and run["stop_reason"] == "worker_lost"
+
+
+async def test_invalid_connection_preserves_original_error(db, run_id, monkeypatch):
+    """Sesión invalidada + fallo real: el error registrado es el ORIGINAL,
+    la etapa queda `failed` (no `running`) y la ejecución termina registrada."""
+    import asyncio  # noqa: F401
+
+    from bore.db.tables import run_events, stage_runs
+    from bore.domain.enums import StageId
+    from bore.orchestration import pipeline as pipeline_mod
+
+    research, analysis, verifier = make_fake_providers()
+
+    async def boom(ctx):
+        conn = await ctx.session.connection()
+        await conn.invalidate()
+        raise RuntimeError("boom_sector_mapping")
+
+    monkeypatch.setitem(pipeline_mod._STAGE_FUNCS, StageId.SECTOR_MAPPING, boom)
+
+    async with db() as s:
+        await run_pipeline(
+            s,
+            db,
+            run_id,
+            DEMO_CONFIG,
+            is_synthetic=True,
+            research=research,
+            analysis=analysis,
+            verifier=verifier,
+        )
+    async with db() as s:
+        run = await repo.get_run(s, run_id)
+        assert run["status"] == "failed"
+        assert "RuntimeError" in (run["error_message_safe"] or "")
+        assert "boom_sector_mapping" in (run["error_message_safe"] or "")
+        row = (
+            await s.execute(
+                sa.select(stage_runs).where(
+                    stage_runs.c.research_run_id == run_id,
+                    stage_runs.c.stage == "sector_mapping",
+                )
+            )
+        ).one()
+        assert row.status == "failed"
+        events = (
+            (
+                await s.execute(
+                    sa.select(run_events.c.event_type).where(run_events.c.research_run_id == run_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert "run_finished" in events
+        assert "stage_failed" in events
+
+
+async def test_cancelled_error_finalizes_run(db, run_id, monkeypatch):
+    """CancelledError en una etapa: ejecución failed + tipo registrado y el
+    error se relanza."""
+    import asyncio
+
+    from bore.db.tables import stage_runs
+    from bore.domain.enums import StageId
+    from bore.orchestration import pipeline as pipeline_mod
+
+    research, analysis, verifier = make_fake_providers()
+
+    async def cancel(ctx):
+        raise asyncio.CancelledError
+
+    monkeypatch.setitem(pipeline_mod._STAGE_FUNCS, StageId.SECTOR_MAPPING, cancel)
+
+    with pytest.raises(asyncio.CancelledError):
+        async with db() as s:
+            await run_pipeline(
+                s,
+                db,
+                run_id,
+                DEMO_CONFIG,
+                is_synthetic=True,
+                research=research,
+                analysis=analysis,
+                verifier=verifier,
+            )
+    async with db() as s:
+        run = await repo.get_run(s, run_id)
+        assert run["status"] == "failed"
+        assert "CancelledError" in (run["error_message_safe"] or "")
+        row = (
+            await s.execute(
+                sa.select(stage_runs).where(
+                    stage_runs.c.research_run_id == run_id,
+                    stage_runs.c.stage == "sector_mapping",
+                )
+            )
+        ).one()
+        assert row.status == "failed"
+
+
+async def test_two_jobs_each_get_fresh_engine(db, monkeypatch):
+    """El worker ejecuta cada trabajo con su propio `asyncio.run`; cada job
+    debe crear su engine dentro de su loop y disponerlo al terminar, sin
+    compartir conexiones entre loops (ni usar el engine global)."""
+    import asyncio
+    import os
+    import uuid
+
+    from bore.config import get_settings
+    from bore.db import session as db_session
+    from bore.orchestration import jobs
+
+    test_settings = get_settings().model_copy(
+        update={"database_url": os.environ["BORE_TEST_DATABASE_URL"]}
+    )
+    monkeypatch.setattr(jobs, "get_settings", lambda: test_settings)
+
+    engines: list[object] = []
+    real_create = db_session.create_async_engine
+
+    def spy(*args, **kwargs):
+        engine = real_create(*args, **kwargs)
+        engines.append(engine)
+        return engine
+
+    monkeypatch.setattr(db_session, "create_async_engine", spy)
+
+    async def _mk_run() -> uuid.UUID:
+        async with db() as s:
+            run = await repo.create_run(
+                s,
+                sector="inmobiliario",
+                country="ES",
+                language="es-ES",
+                config=DEMO_CONFIG,
+                is_synthetic=True,
+                model_config=None,
+                prompt_version="test",
+                rubric_version="rubric-1.1",
+                pricing_version="test",
+            )
+            await s.commit()
+            return run["id"]
+
+    rid1, rid2 = await _mk_run(), await _mk_run()
+    # asyncio.run dentro de un loop en marcha no está permitido: ejecutar el
+    # trabajo síncrono en un hilo, como hace el worker RQ real.
+    await asyncio.to_thread(jobs.run_research_job, str(rid1))
+    await asyncio.to_thread(jobs.run_research_job, str(rid2))
+
+    assert len(engines) == 2
+    assert engines[0] is not engines[1]
+    async with db() as s:
+        assert (await repo.get_run(s, rid1))["status"] == "completed"
+        assert (await repo.get_run(s, rid2))["status"] == "completed"

@@ -177,12 +177,12 @@ def worker() -> None:
     real, mantenimiento de huérfanas y reaper periódico (9.4)."""
     import threading
 
-    from bore.db.session import init_engine
+    from bore.observability import setup_logging
     from bore.orchestration import jobs
     from bore.providers.openai_research import check_models_exist, missing_real_mode_config
 
+    setup_logging()
     settings = get_settings()
-    init_engine(settings.database_url)
     if settings.openai_api_key:
         missing = missing_real_mode_config(settings)
         if missing:
